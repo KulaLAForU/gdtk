@@ -79,6 +79,89 @@ private:
     int _rctIdx;
 }
 
+class BackWardFromEquIfArrhenius : RateConstant {
+public:
+    this(double A, double n, double C, double A_1, double A_2, double A_3, double A_4, double A_5, int rctIdx)
+    {
+        _A = A;
+        _n = n;
+        _C = C;
+        _A_1 = A_1;
+        _A_2 = A_2;
+        _A_3 = A_3;
+        _A_4 = A_4;
+        _A_5 = A_5;
+        _rctIdx = rctIdx;
+    }
+    this(lua_State* L)
+    {
+        _A = getDouble(L, -1, "A");
+        _n = getDouble(L, -1, "n");
+        _C = getDouble(L, -1, "C");
+        _A_1 = getDouble(L, -1, "A_1");
+        _A_2 = getDouble(L, -1, "A_2");
+        _A_3 = getDouble(L, -1, "A_3");
+        _A_4 = getDouble(L, -1, "A_4");
+        _A_5 = getDouble(L, -1, "A_5");
+        _rctIdx = getInt(L, -1, "rctIndex");
+    }
+    BackWardFromEquIfArrhenius dup()
+    {
+        return new BackWardFromEquIfArrhenius(_A, _n, _C, _A_1, _A_2, _A_3, _A_4, _A_5, _rctIdx);
+    }
+    override number eval(in GasState Q)
+    {
+        number T = Q.T;
+        return _A*pow(T, _n)*exp(-_C/T) / (exp(_A_1*(10000.0/T) + _A_2 + _A_3*log(T/10000.0) + _A_4*(T/10000.0) + _A_5 * pow(T / 10000.0, 2)));
+    }
+private:
+    double _A, _n, _C, _A_1, _A_2, _A_3, _A_4, _A_5;
+    int _rctIdx;
+}
+
+class BackWardFromEquIfPark2T : RateConstant {
+public:
+    this(double A, double n, double C, double s, double A_1, double A_2, double A_3, double A_4, double A_5, int mode)
+    {
+        _A = A;
+        _n = n;
+        _C = C;
+        _s = s;
+        _A_1 = A_1;
+        _A_2 = A_2;
+        _A_3 = A_3;
+        _A_4 = A_4;
+        _A_5 = A_5;
+        _mode = mode;
+    }
+    this(lua_State* L)
+    {
+        _A = getDouble(L, -1, "A");
+        _n = getDouble(L, -1, "n");
+        _C = getDouble(L, -1, "C");
+        _s = getDouble(L, -1, "s");
+        _A_1 = getDouble(L, -1, "A_1");
+        _A_2 = getDouble(L, -1, "A_2");
+        _A_3 = getDouble(L, -1, "A_3");
+        _A_4 = getDouble(L, -1, "A_4");
+        _A_5 = getDouble(L, -1, "A_5");
+        _mode = getInt(L, -1, "mode");
+    }
+    BackWardFromEquIfPark2T dup()
+    {
+        return new BackWardFromEquIfPark2T(_A, _n, _C, _s, _A_1, _A_2, _A_3, _A_4, _A_5, _mode);
+    }
+    override number eval(in GasState Q)
+    {
+        number T = Q.T;
+        return exp(_A_1*(10000.0/T) + _A_2 + _A_3*log(T/10000.0) + _A_4*(T/10000.0) + _A_5 * pow(T/10000.0, 2));
+    }
+
+private:
+    double _A, _n, _C, _s, _A_1, _A_2, _A_3, _A_4, _A_5;
+    int _mode;
+}
+
 class ArrheniusRateConstant2 : RateConstant {
 public:
     this(double logA, double B, double C, int rctIdx)
@@ -578,6 +661,10 @@ RateConstant createRateConstant(lua_State* L, Tuple!(int, double)[] efficiencies
     switch (model) {
     case "Arrhenius":
         return new ArrheniusRateConstant(L);
+    case "FromEquArrhenius":
+        return new BackWardFromEquIfArrhenius(L);
+    case "FromEquPark2T":
+        return new BackWardFromEquIfPark2T(L);
     case "Arrhenius2":
         return new ArrheniusRateConstant2(L);
     case "Arrhenius-logA":
