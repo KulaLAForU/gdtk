@@ -51,6 +51,37 @@ local function transformRateConstant(t, coeffs, anonymousCollider, energyModes, 
          end
       end
       m.rctIndex = rctIndex
+   elseif m.model == 'FromEquArrhenius' then
+      m.A = t.A*convFactor
+      m.n = t.n
+      m.C = t.C
+      m.A_1 = t.A_1 
+      m.A_2 = t.A_2
+      m.A_3 = t.A_3
+      m.A_4 = t.A_4
+      m.A_5 = t.A_5
+      local rctIndex = -1
+      if t.rateControllingTemperature then
+         if energyModes[t.rateControllingTemperature] then
+            rctIndex = energyModes[t.rateControllingTemperature]
+         else
+            print("The supplied 'rateControllingTemperature' string is unknown: ", t.rateControllingTemperature)
+            print("Bailing out!")
+            os.exit(1)
+         end
+      end
+      m.rctIndex = rctIndex
+   elseif m.model == 'FromEquPark2T' then
+      m.A = t.A*convFactor
+      m.n = t.n
+      m.C = t.C
+      m.s = t.s
+      m.A_1 = t.A_1 
+      m.A_2 = t.A_2
+      m.A_3 = t.A_3
+      m.A_4 = t.A_4
+      m.A_5 = t.A_5
+      m.mode = energyModes[t.mode] or 0
    elseif m.model == 'Arrhenius-logA' or m.model == 'Arrhenius2' then
       m.logA = t.logA
       m.B = t.B
