@@ -5,6 +5,7 @@ Rowan J. Gollan; Peter A. Jacobs; Kyle A. Damm; Nick N. Gibbons
 :stylesheet: readthedocs.css
 :sectnums:
 :imagesdir: images
+:stem: latexmath
 
 :leveloffset: +1
 
@@ -35,12 +36,14 @@ include::lmr/config-options-user.adoc[]
 include::lmr/grids-in-eilmer.adoc[]
 include::lmr/flow-state-user.adoc[]
 include::lmr/fluid-block-user.adoc[]
+include::lmr/solid-block-user.adoc[]
 include::lmr/boundary-conditions.adoc[]
 include::lmr/flowsolution_user.adoc[]
 
 include::geom/elements-lua.adoc[]
 :leveloffset: +1
 include::geom/surfaces/surfaces.adoc[]
+include::geom/cluster_functions/cluster_functions.adoc[]
 :leveloffset: -1
 include::geom/grid/grid-user.adoc[]
 include::geom/grid/sgrid-user.adoc[]

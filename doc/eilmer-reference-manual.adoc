@@ -5,6 +5,7 @@ Rowan J. Gollan; Peter A. Jacobs
 :stylesheet: readthedocs.css
 :sectnums:
 :imagesdir: images
+:stem: latexmath
 
 :leveloffset: +1
 
@@ -30,6 +31,7 @@ include::eilmer/flowsolution_user.adoc[]
 include::geom/elements-lua.adoc[]
 :leveloffset: +1
 include::geom/surfaces/surfaces.adoc[]
+include::geom/cluster_functions/cluster_functions.adoc[]
 :leveloffset: -1
 include::geom/grid/grid-user.adoc[]
 include::geom/grid/sgrid-user.adoc[]

@@ -10,10 +10,13 @@
 
 module lmr.solid.solidthermalmodel;
 
+import std.stdio : File, writefln;
 import std.format : format;
 import std.typecons : Tuple;
 import std.algorithm : min, max;
 import std.conv : to;
+import std.array : split;
+import std.string : strip;
 import std.json;
 import std.math;
 
@@ -115,14 +118,16 @@ alias LVModelParams = Tuple!(double, "T", double, "rho", double, "k", double, "C
 class LinearVariationSTM : SolidThermalModel
 {
 public:
-    this(LVModelParams min, LVModelParams max)
+    this(double e_ref, LVModelParams min, LVModelParams max)
     {
+        m_e_ref = e_ref;
         m_min = min;
         m_max = max;
     }
 
     this(JSONValue jsonData)
     {
+        m_e_ref = getJSONdouble(jsonData, "e_ref", 0.0);
         m_min.T = getJSONdouble(jsonData["min"], "T", -1.0);
         m_min.rho = getJSONdouble(jsonData["min"], "rho", -1.0);
         m_min.k = getJSONdouble(jsonData["min"], "k", -1.0);
@@ -135,6 +140,7 @@ public:
 
     this(lua_State* L, int tblIdx)
     {
+        m_e_ref = getDouble(L, tblIdx, "e_ref");
         lua_getfield(L, tblIdx, "min");
         m_min.T = getDouble(L, -1, "T");
         m_min.rho = getDouble(L, -1, "rho");
@@ -165,22 +171,149 @@ protected:
     override void _updateEnergy(ref SolidState ss) const
     {
         auto lambda = (m_max.Cp - m_min.Cp)/(m_max.T - m_min.T);
-        auto calc = (lambda/2) * (ss.T^^2 - m_min.T^^2) + lambda*m_min.T^^2 - lambda*m_min.T*ss.T + m_min.Cp*(ss.T - m_min.T);
-        ss.e = m_min.rho * calc;
+        auto energy = m_min.rho * ((lambda/2) * (ss.T^^2 - m_min.T^^2) + lambda*m_min.T^^2 - lambda*m_min.T*ss.T + m_min.Cp*(ss.T - m_min.T)) + m_e_ref;
+        auto e_min = m_e_ref;
+        auto e_max = m_min.rho * ((lambda/2) * (ss.T^^2 - m_min.T^^2) + lambda*m_min.T^^2 - lambda*m_min.T*ss.T + m_min.Cp*(m_max.T - m_min.T)) + m_e_ref;
+        if (ss.T < m_min.T) {
+            ss.e = e_min + m_min.rho * m_min.Cp * (ss.T - m_min.T);
+        } else if (m_min.T <= ss.T && ss.T <= m_max.T) {
+            ss.e = energy;
+        } else {
+            ss.e = e_max + m_min.rho * m_max.Cp * (ss.T - m_max.T);
+        }
     }
     @nogc
     override void _updateTemperature(ref SolidState ss) const 
     {
         auto lambda = (m_max.Cp - m_min.Cp)/(m_max.T - m_min.T);
-        auto sqrtTrm = sqrt(m_min.Cp^^2 * m_min.rho^^2 + 2 * ss.e * lambda * m_min.rho);
+        auto sqrtTrm = sqrt(m_min.Cp^^2 * m_min.rho^^2 + 2 * ss.e * lambda * m_min.rho + 2 * lambda * m_min.rho * m_e_ref);
         auto numer = lambda*m_min.rho*m_min.T - m_min.Cp*m_min.rho + sqrtTrm;
         auto denom = lambda*m_min.rho;
         ss.T = numer/denom;
     }
 
-private:    
+private:
+    double m_e_ref;
     LVModelParams m_min;
     LVModelParams m_max;
+}
+
+alias TableEntry = Tuple!(double, "T", double, "k", double, "Cp", double, "e");
+
+class TabulatedPropertiesModelSTM : SolidThermalModel {
+public:
+    this(double rho, string filename)
+    {
+        File f;
+        try {
+            f = File(filename, "r");
+        }
+        catch (Exception e) {
+            string errMsg = "Error while initialising the TabulatedPropertiesModel\n";
+            errMsg ~= format("Unable to open file: %s\n", filename);
+            lmrErrorExit(LmrError.initialisation, errMsg);
+        }
+        // Throw away first line header.
+        f.readln();
+        string line;
+        while ((line = f.readln()) != null) {
+            auto tokens = line.split(",");
+            mTab ~= TableEntry();
+            mTab[$-1].T = to!float(strip(tokens[0]));
+            mTab[$-1].k = to!float(strip(tokens[1]));
+            mTab[$-1].Cp = to!float(strip(tokens[2]));
+            mTab[$-1].e = to!float(strip(tokens[3]));
+        }
+        f.close();
+
+        // Construct a linear variation model for each part of the table
+        foreach (i; 1 .. mTab.length) {
+            auto min = LVModelParams(mTab[i-1].T, rho, mTab[i-1].k, mTab[i-1].Cp);
+            auto max = LVModelParams(mTab[i].T, rho, mTab[i].k, mTab[i].Cp);
+            mLvms ~= new LinearVariationSTM(mTab[i-1].e, min, max);
+        }
+    }
+
+    this(JSONValue jsonData)
+    {
+        auto rho = getJSONdouble(jsonData, "rho", 0.0);
+        auto fname = getJSONstring(jsonData, "filename", "");
+        this(rho, fname);     
+    }
+
+    this(lua_State *L, int tblIdx)
+    {
+        auto rho = getDouble(L, tblIdx, "rho");
+        auto fname = getString(L, tblIdx, "filename");
+        this(rho, fname);
+    }
+
+    @nogc
+    override void updateProperties(ref SolidState ss) const
+    {
+        if (isNaN(ss.T.re)) {
+            _updateTemperature(ss);
+        }
+        auto idx = findTemperatureInTable(ss.T.re);
+        mLvms[idx].updateProperties(ss);
+    }
+
+protected:
+    /**
+     * Return lower index of table entry.
+     *
+     * For example:
+     *
+     *  0:  500.0
+     *  1: 1000.0
+     *  2: 1500.0
+     *
+     * For T = 1235.0, returns 1. 
+     */
+    @nogc
+    size_t findTemperatureInTable(double T) const
+    {
+        if (T > mTab[$-1].T) return mLvms.length-1;
+
+        foreach (i; 1 .. mTab.length) {
+            if (T < mTab[i].T) return i-1;
+        }
+
+        // We shouldn't get here, but we return 0 if we do.
+        return 0;
+    }
+
+    @nogc
+    size_t findEnergyInTable(double e) const
+    {
+        if (e > mTab[$-1].e) return mLvms.length - 1;
+
+        foreach (i; 1 .. mTab.length) {
+            if (e < mTab[i].e) return i-1;
+        }
+
+        return 0;
+    }
+
+    @nogc
+    override void _updateEnergy(ref SolidState ss) const
+    {
+        auto idx = findTemperatureInTable(ss.T.re);
+        mLvms[idx]._updateEnergy(ss);
+    }
+
+    @nogc
+    override void _updateTemperature(ref SolidState ss) const
+    {
+        auto idx = findEnergyInTable(ss.e.re);
+        mLvms[idx]._updateTemperature(ss);
+    }
+    
+
+private:
+    TableEntry[] mTab;
+    LinearVariationSTM[] mLvms;
+        
 }
 
 SolidThermalModel initSolidThermalModel(JSONValue jsonData)
@@ -195,6 +328,9 @@ SolidThermalModel initSolidThermalModel(JSONValue jsonData)
             break;
         case "linear_variation":
             stm = new LinearVariationSTM(jsonData);
+            break;
+        case "tabulated_properties":
+            stm = new TabulatedPropertiesModelSTM(jsonData);
             break;
         default:
             string errMsg = format("The solid thermal model '%s' is not available.", modelType);
@@ -222,6 +358,9 @@ SolidThermalModel initSolidThermalModel(lua_State* L, int tblIdx)
             break;
         case "linear_variation":
             stm = new LinearVariationSTM(L, tblIdx);
+            break;
+        case "tabulated_properties":
+            stm = new TabulatedPropertiesModelSTM(L, tblIdx);
             break;
         default:
             string errMsg = format("The solid thermal model '%s' is not available.", modelType);

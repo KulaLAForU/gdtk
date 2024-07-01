@@ -187,6 +187,7 @@ public:
             jx = other.jx.dup();
             jy = other.jy.dup();
             jz = other.jz.dup();
+            hs = other.hs.dup();
         }
         // FIX-ME - KYLE -- there's a typo here. Not sure the intent.
         version(steadystate) {
@@ -196,6 +197,7 @@ public:
             foreach (ref a; dFdU_R) a.length = 5;
         }
         q_diffusion = other.q_diffusion;
+        q_conduction = other.q_conduction;
     }
 
     @nogc

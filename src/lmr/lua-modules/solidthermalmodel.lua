@@ -25,15 +25,27 @@ function ConstantPropertiesModel:tojson()
    return str
 end
 
-LinearVariationModel = SolidThermalModel:new{min=nil, max=nil}
+LinearVariationModel = SolidThermalModel:new{e_ref=0.0, min=nil, max=nil}
 LinearVariationModel.type = "linear_variation"
 function LinearVariationModel:tojson()
    local str = '  {\n'
    str = str .. string.format('   "type": "%s",\n', self.type)
+   str = str .. string.format('   "e_ref": %.18e,\n', self.e_ref)
    str = str .. string.format('   "min": { "T": %.18e, "rho": %.18e, "k": %.18e, "Cp": %.18e },\n',
       self.min.T, self.min.rho, self.min.k, self.min.Cp)
    str = str .. string.format('   "max": { "T": %.18e, "rho": %.18e, "k": %.18e, "Cp": %.18e }\n',
       self.max.T, self.max.rho, self.max.k, self.max.Cp)
+   str = str .. '   }'
+   return str
+end
+
+TabulatedPropertiesModel = SolidThermalModel:new{rho=nil, filename=''}
+TabulatedPropertiesModel.type = "tabulated_properties"
+function TabulatedPropertiesModel:tojson()
+   local str = '  {\n'
+   str = str .. string.format('   "type": "%s",\n', self.type)
+   str = str .. string.format('   "rho": %.18e,\n', self.rho)
+   str = str .. string.format('   "filename": "%s"\n', self.filename)
    str = str .. '   }'
    return str
 end

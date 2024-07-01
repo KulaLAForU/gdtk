@@ -525,6 +525,14 @@ public:
             dr = my_r - other_r;
             distance = fabs(dr);
             break;
+        case "2Daxi-to-3D-rotating":
+            // Map the y axis of a 2D simulation to the x-y plane of a 3D
+            // simulation, ignoring the other axes. (NNG, June 2024)
+            other_r = sqrt(other_pos.y.re^^2);
+            my_r = sqrt(my_pos.y.re^^2 + my_pos.x.re^^2);
+            dr = my_r - other_r;
+            distance = fabs(dr);
+            break;
         default:
             throw new FlowSolverException("Invalid match option.");
         }
@@ -557,7 +565,7 @@ public:
     } // end get_flowstate()
 
     @nogc
-    void adjust_velocity(ref FlowState fs, ref const(Vector3) my_pos)
+    void adjust_velocity(ref FlowState fs, ref const(Vector3) my_pos, double omegaz)
     {
         switch (posMatch) {
         case "xyz-to-xyz": /* 3D, do nothing. */ break;
@@ -571,6 +579,20 @@ public:
             double vely_sign = (fs.vel.y < 0.0) ? -1.0 : 1.0;
             fs.vel.y = vely_sign * vel_yz * my_pos.y.re / r;
             fs.vel.z = vely_sign * vel_yz * my_pos.z.re / r;
+            break;
+        case "2Daxi-to-3D-rotating":
+            double axi_vely = sqrt(fs.vel.y.re^^2);
+            double axi_velx = fs.vel.x.re;
+
+            double cyl_theta = atan2(my_pos.y.re, my_pos.x.re);
+            double cyl_vel_x = axi_vely*cos(cyl_theta);
+            double cyl_vel_y = axi_vely*sin(cyl_theta);
+            double cyl_vel_z = axi_velx;
+
+            fs.vel.x = cyl_vel_x;
+            fs.vel.y = cyl_vel_y;
+            fs.vel.z = cyl_vel_z;
+            if (omegaz != 0.0) { into_rotating_frame(fs.vel, my_pos, omegaz); }
             break;
         default:
             throw new FlowSolverException("Invalid match option.");
