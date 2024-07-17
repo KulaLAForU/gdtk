@@ -100,7 +100,61 @@ private:
     int m_p;
     int m_q;
 }
+class ParkPreferentialConst : EnergyExchangeMechanism {
+    /*
+        NASA Reference Publication 1232, A review of reaction rates and thermodynamic and 
+        transport properties for an 11-species air model for chemical and 
+        thermal nonequilibrium calculations to 30000 K by Gupta, Yos, and Thompson 1990.
 
+
+        @author: Jianshu Wu
+    */
+    this(lua_State *L, int mode, GasModel gmodel)
+    {
+        m_mode_p = mode;
+        m_mode_q = -1;
+        mGmodel = gmodel;
+
+        mReactionIdx = getInt(L, -1, "reaction_index");
+        mSpeciesIdx  = gmodel.species_index(getString(L, -1, "p"));
+        lua_getfield(L, -1, "coupling_model");
+        mECC = createExchangeChemistryCoupling(L, gmodel, mode, mSpeciesIdx);
+        lua_pop(L, 1);
+    }
+
+    this(int mode, GasModel gmodel, int reactionidx, int speciesidx, ExchangeChemistryCoupling ECC)
+    {
+        m_mode_p = mode;
+        m_mode_q = -1;
+        mGmodel = gmodel;
+        mReactionIdx = reactionidx;
+        mSpeciesIdx = speciesidx;
+        mECC = ECC.dup();
+    }
+
+    @nogc
+    override number rate(in GasState gs, in GasState gsEq, number[] molef, number[] numden, in ReactionMechanism rMech)
+    {
+    number rate = rMech.production_rate(mReactionIdx, mSpeciesIdx)*mECC.Gappear(gs)
+                - rMech.loss_rate(mReactionIdx, mSpeciesIdx)*mECC.Gvanish(gs);
+
+    // Convert from J/m3/s (energy density of a specific oscillator) 
+    // to J/kg/s (total vibrational energy of per unit mass of mixture)
+    return rate/gs.rho;
+    }
+
+    @nogc
+    override void evalRelaxationTime(in GasState gs, number[] molef, number[] numden)
+    {
+        // TODO: Maybe precompute some things here
+        return;
+    }
+
+private:
+    int mReactionIdx, mSpeciesIdx;
+    GasModel mGmodel;
+    ExchangeChemistryCoupling mECC;
+}
 class ElectronExchangeET : EnergyExchangeMechanism {
     /*
         This rate expression accounts energy transfer between the electron
@@ -323,6 +377,8 @@ EnergyExchangeMechanism createEnergyExchangeMechanism(lua_State *L, int mode_p, 
     switch (rateModel) {
     case "Landau-Teller":
         return new LandauTeller(L, mode_p, mode_q, gmodel);
+    case "Park-Preferential-Const":
+        return new ParkPreferentialConst(L, mode_p, gmodel);
     case "ElectronExchange":
         return new ElectronExchangeET(L, mode_p, gmodel);
     case "Marrone-Treanor":
