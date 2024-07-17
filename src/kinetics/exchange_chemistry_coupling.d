@@ -130,6 +130,47 @@ private:
     int mode;
 }
 
+class PreferentialDissociation : ExchangeChemistryCoupling {
+    /*
+        Here Gappear stands for 0.3 * dissociation rate, and Gvanish stands for 0.3 * dissociation rate. 
+        NASA Reference Publication 1232, A review of reaction rates and thermodynamic and 
+        transport properties for an 11-species air model for chemical and 
+        thermal nonequilibrium calculations to 30000 K by Gupta, Yos, and Thompson 1990.
+
+
+        @author: Jianshu Wu
+    */
+    this(lua_State *L, int mode) {
+        this.D = getDouble(L, -1, "D");
+        this.Thetav = getDouble(L, -1, "Thetav");
+        this.mode = mode;
+    }
+
+    this(double D, double Thetav, int mode) {
+        this.D = D;
+        this.Thetav = Thetav;
+        this.mode = mode;
+    }
+
+    ImpartialDissociation dup() {
+        return new ImpartialDissociation(D, Thetav, mode);
+    }
+    
+    @nogc
+    number Gvanish(in GasState gs) {
+        return 0.3 * D;
+    }
+
+    @nogc
+    number Gappear(in GasState gs) {
+        return 0.3 * D;
+    }
+
+private:
+    const double D, Thetav;
+    int mode;
+}
+
 class MarroneTreanorDissociation : ExchangeChemistryCoupling {
     this (double theta_v, double D, double U, int mode) {
         this._theta_v = theta_v;
@@ -266,6 +307,8 @@ ExchangeChemistryCoupling createExchangeChemistryCoupling(lua_State *L, GasModel
     switch (model) {
     case "ImpartialDissociation":
         return new ImpartialDissociation(L, mode);
+    case "PreferentialDissociation":
+        return new PreferentialDissociation(L, mode);
     case "MarroneTreanorDissociation":
         return new MarroneTreanorDissociation(L, mode);
     case "ModifiedMarroneTreanorDissociation":
