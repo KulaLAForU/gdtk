@@ -526,6 +526,9 @@ private:
         return 1.0/tauInv;
            END: RJG, 2018-12-22
         */
+        number s = 3.5*exp(-5000.0/8000.0);
+        number tauInv = (1.0/tauV)*(pow(fabs((8000.0 - Q.T_modes[0])/(8000.0 - 293.0)), s-1.0));
+        return 1.0/tauInv;
 
     }
 
