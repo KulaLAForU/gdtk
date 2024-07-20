@@ -514,7 +514,7 @@ private:
         number tauP = 1.0/(sigma_s*cBar_s*nd);
         // 3. Combine M-W and Park values.
         number tauV = tauMW + tauP;
-        return tauV;
+        // return tauV;
 
         /* RJG, 2018-12-22
            Remove this correction for present. It is causing issues.
