@@ -1,0 +1,12 @@
+# Customize title and labels (change these as needed)
+set title "Temperature Variation along Stagnation Line" 
+set xlabel "Stagnation Line Arc Length" 
+set ylabel "Temperature (K)" 
+
+# Specify the correct delimiter if not commas 
+# set datafile separator ","  # Default, uncomment if needed for other delimiters
+
+# Plot "T" and "T_modes[0]" vs "arc_length"
+# *** ADJUST COLUMN NUMBERS IF NEEDED ***
+plot "sphere-nonaka-viscous_nonslip.csv" using 32:2 with lines title "T", \
+     "

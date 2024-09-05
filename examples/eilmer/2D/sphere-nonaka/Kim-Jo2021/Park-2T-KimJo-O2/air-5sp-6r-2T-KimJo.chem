@@ -1,0 +1,173 @@
+species = {[0]='N2', [1]='O2', [2]='N', [3]='O', [4]='NO',}
+config = {
+  tempLimits = {lower=300.000000, upper=30000.000000},
+  odeStep = {method='rkf', errTol=1.000000e-09},
+  tightTempCoupling = true,
+  maxSubcycles = 10000,
+  maxAttempts = 4
+}
+
+reaction = {}
+reaction[1] = {
+  equation = "N2 + N2 <=> N + N + N2",
+  type = "elementary",
+  frc = {model='Park', A=1.216000000000e+14, n=-1.214000, C=1.132000000000e+05, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=1.216000000000e+14, n=-1.214000, C=1.132000000000e+05, s=1.00000, mode=0, A_1=2.491, A_2=14.53101056, A_3=2.091, A_4=-11.69, A_5=0.005921},  
+  ec = {},
+  reacIdx = { 0,},
+  reacCoeffs = { 2,},
+  prodIdx = { 0, 2,},
+  prodCoeffs = { 1, 2,},
+}
+
+reaction[2] = {
+  equation = "N2 + O2 <=> N + N + O2",
+  type = "elementary",
+  frc = {model='Park', A=7.000000000000e+15, n=-1.600000, C=1.132000000000e+05, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=7.000000000000e+15, n=-1.600000, C=1.132000000000e+05, s=1.00000, mode=0, A_1=2.491, A_2=14.53101056, A_3=2.091, A_4=-11.69, A_5=0.005921},  
+  ec = {},
+  reacIdx = { 0, 1,},
+  reacCoeffs = { 1, 1,},
+  prodIdx = { 1, 2,},
+  prodCoeffs = { 1, 2,},
+}
+
+reaction[3] = {
+  equation = "N2 + NO <=> N + N + NO",
+  type = "elementary",
+  frc = {model='Park', A=7.000000000000e+15, n=-1.600000, C=1.132000000000e+05, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=7.000000000000e+15, n=-1.600000, C=1.132000000000e+05, s=1.00000, mode=0, A_1=2.491, A_2=14.53101056, A_3=2.091, A_4=-11.69, A_5=0.005921},  
+  ec = {},
+  reacIdx = { 0, 4,},
+  reacCoeffs = { 1, 1,},
+  prodIdx = { 2, 4,},
+  prodCoeffs = { 2, 1,},
+}
+
+reaction[4] = {
+  equation = "N2 + N <=> N + N + N",
+  type = "elementary",
+  frc = {model='Park', A=3.591000000000e+14, n=-1.226000, C=1.132000000000e+05, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=3.591000000000e+14, n=-1.226000, C=1.132000000000e+05, s=1.00000, mode=0, A_1=2.491, A_2=14.53101056, A_3=2.091, A_4=-11.69, A_5=0.005921},  
+  ec = {},
+  reacIdx = { 0, 2,},
+  reacCoeffs = { 1, 1,},
+  prodIdx = { 2,},
+  prodCoeffs = { 3,},
+}
+
+reaction[5] = {
+  equation = "N2 + O <=> N + N + O",
+  type = "elementary",
+  frc = {model='Park', A=3.000000000000e+16, n=-1.600000, C=1.132000000000e+05, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=3.000000000000e+16, n=-1.600000, C=1.132000000000e+05, s=1.00000, mode=0, A_1=2.491, A_2=14.53101056, A_3=2.091, A_4=-11.69, A_5=0.005921},  
+  ec = {},
+  reacIdx = { 0, 3,},
+  reacCoeffs = { 1, 1,},
+  prodIdx = { 2, 3,},
+  prodCoeffs = { 2, 1,},
+}
+
+reaction[6] = {
+  equation = "O2 + N2 <=> O + O + N2",
+  type = "elementary",
+  frc = {model='Park', A=3.354000000000e+09, n=-0.272600, C=5.950000000000e+04, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=3.354000000000e+09, n=-0.272600, C=5.950000000000e+04, s=1.00000, mode=0, A_1=1.567, A_2=15.03251056, A_3=1.909, A_4=-6.281, A_5=0.005237},  
+  ec = {},
+  reacIdx = { 0, 1,},
+  reacCoeffs = { 1, 1,},
+  prodIdx = { 0, 3,},
+  prodCoeffs = { 1, 2,},
+}
+
+reaction[7] = {
+  equation = "O2 + O2 <=> O + O + O2",
+  type = "elementary",
+  frc = {model='Park', A=1.117000000000e+19, n=-2.585000, C=5.950000000000e+04, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=1.117000000000e+19, n=-2.585000, C=5.950000000000e+04, s=1.00000, mode=0, A_1=1.567, A_2=15.03251056, A_3=1.909, A_4=-6.281, A_5=0.005237},  
+  ec = {},
+  reacIdx = { 1,},
+  reacCoeffs = { 2,},
+  prodIdx = { 1, 3,},
+  prodCoeffs = { 1, 2,},
+}
+
+reaction[8] = {
+  equation = "O2 + NO <=> O + O + NO",
+  type = "elementary",
+  frc = {model='Park', A=3.354000000000e+09, n=-0.272600, C=5.950000000000e+04, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=3.354000000000e+09, n=-0.272600, C=5.950000000000e+04, s=1.00000, mode=0, A_1=1.567, A_2=15.03251056, A_3=1.909, A_4=-6.281, A_5=0.005237},  
+  ec = {},
+  reacIdx = { 1, 4,},
+  reacCoeffs = { 1, 1,},
+  prodIdx = { 3, 4,},
+  prodCoeffs = { 2, 1,},
+}
+
+reaction[9] = {
+  equation = "O2 + N <=> O + O + N",
+  type = "elementary",
+  frc = {model='Park', A=1.000000000000e+16, n=-1.500000, C=5.950000000000e+04, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=1.000000000000e+16, n=-1.500000, C=5.950000000000e+04, s=1.00000, mode=0, A_1=1.567, A_2=15.03251056, A_3=1.909, A_4=-6.281, A_5=0.005237},  
+  ec = {},
+  reacIdx = { 1, 2,},
+  reacCoeffs = { 1, 1,},
+  prodIdx = { 2, 3,},
+  prodCoeffs = { 1, 2,},
+}
+
+reaction[10] = {
+  equation = "O2 + O <=> O + O + O",
+  type = "elementary",
+  frc = {model='Park', A=3.000000000000e+15, n=-1.500000, C=5.950000000000e+04, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=3.000000000000e+15, n=-1.500000, C=5.950000000000e+04, s=1.00000, mode=0, A_1=1.567, A_2=15.03251056, A_3=1.909, A_4=-6.281, A_5=0.005237},  
+  ec = {},
+  reacIdx = { 1, 3,},
+  reacCoeffs = { 1, 1,},
+  prodIdx = { 3,},
+  prodCoeffs = { 3,},
+}
+
+reaction[11] = {
+  equation = "NO + M <=> N + O + M",
+  type = "anonymous_collider",
+  frc = {model='Park', A=1.000000000000e+9, n=0.00000, C=7.550000000000e+04, s=0.500000, mode=0 },
+  brc = {model='FromEquPark2T', A=1.000000000000e+9, n=0.00000, C=7.550000000000e+04, s=1.00000, mode=0, A_1=2.093, A_2=13.19261056, A_3=2.028, A_4=-7.872, A_5=0.005586},
+  ec = {},
+  reacIdx = { 4,},
+  reacCoeffs = { 1,},
+  prodIdx = { 2, 3,},
+  prodCoeffs = { 1, 1,},
+  efficiencies = {
+    [0]=1.450000e+00,
+    [1]=1.450000e+00,
+    [2]=9.640000e-01,
+    [3]=9.640000e-01,
+    [4]=9.640000e-01,
+  },
+  label = "r4",
+}
+
+reaction[12] = {
+  equation = "NO + O <=> O2 + N",
+  type = "elementary",
+  frc = {model='Arrhenius', A=8.400000000000e+06, n=0.000000, C=1.945000000000e+04, rctIndex=-1},
+  brc = {model='FromEquPark2T', A=8.400000000000e+06, n=0.000000, C=1.945000000000e+04, s=1.00000, mode=0, A_1=-0.1673, A_2=12.42551056, A_3=-0.1656, A_4=-1.551, A_5=-0.0001102},  
+  ec = {},
+  reacIdx = { 3, 4,},
+  reacCoeffs = { 1, 1,},
+  prodIdx = { 1, 2,},
+  prodCoeffs = { 1, 1,},
+}
+
+reaction[13] = {
+  equation = "N2 + O <=> NO + N",
+  type = "elementary",
+  frc = {model='Arrhenius', A=6.400000000000e+11, n=-1.000000, C=3.840000000000e+04, rctIndex=-1},
+  brc = {model='FromEquPark2T', A=6.400000000000e+11, n=-1.000000, C=3.840000000000e+04, s=1.00000, mode=0, A_1=-0.1789, A_2=15.54351056, A_3=-0.2172, A_4=-3.733, A_5=-0.0002285},  
+  ec = {},
+  reacIdx = { 0, 3,},
+  reacCoeffs = { 1, 1,},
+  prodIdx = { 2, 4,},
+  prodCoeffs = { 1, 1,},
+}

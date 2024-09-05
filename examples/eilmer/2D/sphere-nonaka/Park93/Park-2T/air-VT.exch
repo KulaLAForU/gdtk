@@ -1,0 +1,152 @@
+
+mechanism = {}
+
+mechanism[1] = {
+  type = 'V-T',
+  p = 'N2', q = 'N2',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=221.000, b=0.0290}}
+  
+}
+
+mechanism[2] = {
+  type = 'V-T',
+  p = 'N2', q = 'O2',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=229.000, b=0.0295}}
+}
+
+mechanism[3] = {
+  type = 'V-T',
+  p = 'N2', q = 'N',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=180.000, b=0.0262}}
+}
+
+mechanism[4] = {
+  type = 'V-T',
+  p = 'N2', q = 'O',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=72.400, b=0.0150}}
+}
+
+mechanism[5] = {
+  type = 'V-T',
+  p = 'N2', q = 'NO',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=225.000, b=0.0293}}
+}
+
+mechanism[6] = {
+  type = 'V-T',
+  p = 'O2', q = 'N2',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=134.000, b=0.0295}}
+}
+
+mechanism[7] = {
+  type = 'V-T',
+  p = 'O2', q = 'O2',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=138.000, b=0.03}}
+}
+
+mechanism[8] = {
+  type = 'V-T',
+  p = 'O2', q = 'N',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=72.40, b=0.015}}
+
+}
+
+mechanism[9] = {
+  type = 'V-T',
+  p = 'O2', q = 'O',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=47.700, b=0.059}}
+}
+
+mechanism[10] = {
+  type = 'V-T',
+  p = 'O2', q = 'NO',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=136.000, b=0.0298}}
+}
+
+mechanism[11] = {
+  type = 'V-T',
+  p = 'NO', q = 'N2',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=49.50, b=0.042}}
+}
+
+mechanism[12] = {
+  type = 'V-T',
+  p = 'NO', q = 'O2',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=49.50, b=0.042}}
+}
+
+mechanism[13] = {
+  type = 'V-T',
+  p = 'NO', q = 'N',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=49.50, b=0.042}}
+}
+
+mechanism[14] = {
+  type = 'V-T',
+  p = 'NO', q = 'O',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=49.50, b=0.042}}
+}
+
+mechanism[15] = {
+  type = 'V-T',
+  p = 'NO', q = 'NO',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='ParkHTC2', sigma=3.0000e-21, submodel={model='Millikan-White', a=49.50, b=0.042}}
+}
+
+mechanism[16] = {
+  type = 'C-V',
+  p = 'O2',
+  rate = 'Park-Preferential-Const',
+  mode_p = 0,
+  reaction_index = 0,
+  coupling_model = {model='PreferentialDissociation', D=494683.000000, Thetav=2273.530000}
+}
+
+mechanism[17] = {
+  type = 'C-V',
+  p = 'N2',
+  rate = 'Park-Preferential-Const',
+  mode_p = 0,
+  reaction_index = 1,
+  coupling_model = {model='PreferentialDissociation', D=941144.000000, Thetav=3393.440000}
+}
+
+mechanism[18] = {
+  type = 'C-V',
+  p = 'NO',
+  rate = 'Park-Preferential-Const',
+  mode_p = 0,
+  reaction_index = 3,
+  coupling_model = {model='PreferentialDissociation', D=627707.000000, Thetav=2739.700000}
+}
+
