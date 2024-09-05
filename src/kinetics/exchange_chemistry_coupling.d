@@ -129,6 +129,96 @@ private:
     const double D, Thetav;
     int mode;
 }
+class PreferentialDissociation : ExchangeChemistryCoupling {
+    /*
+        Here Gappear stands for 0.3 * dissociation rate, and Gvanish stands for 0.3 * dissociation rate. 
+        NASA Reference Publication 1232, A review of reaction rates and thermodynamic and 
+        transport properties for an 11-species air model for chemical and 
+        thermal nonequilibrium calculations to 30000 K by Gupta, Yos, and Thompson 1990.
+
+
+        @author: Jianshu Wu
+    */
+    this(lua_State *L, int mode) {
+        this.D = getDouble(L, -1, "D");
+        this.Thetav = getDouble(L, -1, "Thetav");
+        this.mode = mode;
+    }
+
+    this(double D, double Thetav, int mode) {
+        this.D = D;
+        this.Thetav = Thetav;
+        this.mode = mode;
+    }
+
+    PreferentialDissociation dup() {
+        return new PreferentialDissociation(D, Thetav, mode);
+    }
+    
+    @nogc
+    number Gvanish(in GasState gs) {
+        return 0.3 * D;
+    }
+
+    @nogc
+    number Gappear(in GasState gs) {
+        return 0.3 * D;
+    }
+
+private:
+    const double D, Thetav;
+    int mode;
+}
+
+class KimJoCV : EnergyExchangeMechanism {
+    /*
+        Equation 7 from Kim and Jo, 2021
+    */
+    this(lua_State *L, int mode, GasModel gmodel)
+    {
+        m_mode_p = mode;
+        m_mode_q = -1;
+        mGmodel = gmodel;
+
+        mReactionIdx = getInt(L, -1, "reaction_index");
+        mSpeciesIdx  = gmodel.species_index(getString(L, -1, "p"));
+        lua_getfield(L, -1, "coupling_model");
+        mECC = createExchangeChemistryCoupling(L, gmodel, mode, mSpeciesIdx);
+        lua_pop(L, 1);
+    }
+
+    this(int mode, GasModel gmodel, int reactionidx, int speciesidx, ExchangeChemistryCoupling ECC)
+    {
+        m_mode_p = mode;
+        m_mode_q = -1;
+        mGmodel = gmodel;
+        mReactionIdx = reactionidx;
+        mSpeciesIdx = speciesidx;
+        mECC = ECC.dup();
+    }
+
+    @nogc
+    override number rate(in GasState gs, in GasState gsEq, number[] molef, number[] numden, in ReactionMechanism rMech)
+    {
+    number rate = rMech.production_rate(mReactionIdx, mSpeciesIdx)*mECC.Gappear(gs)
+                - rMech.loss_rate(mReactionIdx, mSpeciesIdx)*mECC.Gvanish(gs);
+
+    // Convert from J/m3/s (energy density of a specific oscillator) 
+    // to J/kg/s (total vibrational energy of per unit mass of mixture)
+    return rate/gs.rho;
+    }
+    @nogc
+    override void evalRelaxationTime(in GasState gs, number[] molef, number[] numden)
+    {
+        // TODO: Maybe precompute some things here
+        return;
+    }
+
+private:
+    int mReactionIdx, mSpeciesIdx;
+    GasModel mGmodel;
+    ExchangeChemistryCoupling mECC;
+}
 
 class MarroneTreanorDissociation : ExchangeChemistryCoupling {
     this (double theta_v, double D, double U, int mode) {
@@ -268,6 +358,10 @@ ExchangeChemistryCoupling createExchangeChemistryCoupling(lua_State *L, GasModel
         return new ImpartialDissociation(L, mode);
     case "MarroneTreanorDissociation":
         return new MarroneTreanorDissociation(L, mode);
+    case "PreferentialDissociation":
+        return new PreferentialDissociation(L, mode);
+    case "Kim-Jo-CV":
+        return new KimJoCV(L, mode_p, gmodel);
     case "ModifiedMarroneTreanorDissociation":
         return new ModifiedMarroneTreanorDissociation(L, mode);
     case "ImpartialChem":
