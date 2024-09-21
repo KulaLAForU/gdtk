@@ -201,14 +201,14 @@ class KimHTCEnergyLoss : ExchangeChemistryCoupling {
     @nogc
     number Gvanish(in GasState gs) {
         number T = gs.T;
-        double L0 = D * exp(K1 / T + K2 + K3 * log(T) + K4 * T + K5 * T * T);
+        number L0 = D * exp(K1 / T + K2 + K3 * log(T) + K4 * T + K5 * T * T);
         return to!number(L0);
     }
 
     @nogc
     number Gappear(in GasState gs) {
         number T = gs.T;
-        double L0 = D * exp(K1 / T + K2 + K3 * log(T) + K4 * T + K5 * T * T);
+        number L0 = D * exp(K1 / T + K2 + K3 * log(T) + K4 * T + K5 * T * T);
         return to!number(L0);
     }
 
