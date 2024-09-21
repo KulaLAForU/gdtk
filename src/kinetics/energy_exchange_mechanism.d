@@ -100,6 +100,7 @@ private:
     int m_p;
     int m_q;
 }
+
 class ParkPreferentialConst : EnergyExchangeMechanism {
     /*
         NASA Reference Publication 1232, A review of reaction rates and thermodynamic and 
@@ -204,6 +205,7 @@ private:
     GasModel mGmodel;
     ExchangeChemistryCoupling mECC;
 }
+
 class ElectronExchangeET : EnergyExchangeMechanism {
     /*
         This rate expression accounts energy transfer between the electron

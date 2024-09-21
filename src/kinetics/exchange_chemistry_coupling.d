@@ -141,18 +141,16 @@ class PreferentialDissociation : ExchangeChemistryCoupling {
     */
     this(lua_State *L, int mode) {
         this.D = getDouble(L, -1, "D");
-        this.Thetav = getDouble(L, -1, "Thetav");
         this.mode = mode;
     }
 
-    this(double D, double Thetav, int mode) {
+    this(double D, int mode) {
         this.D = D;
-        this.Thetav = Thetav;
         this.mode = mode;
     }
 
     PreferentialDissociation dup() {
-        return new PreferentialDissociation(D, Thetav, mode);
+        return new PreferentialDissociation(D,mode);
     }
     
     @nogc
@@ -166,58 +164,54 @@ class PreferentialDissociation : ExchangeChemistryCoupling {
     }
 
 private:
-    const double D, Thetav;
+    const double D;
     int mode;
 }
 
-class KimJoCV : EnergyExchangeMechanism {
+class KimHTCEnergyLoss : ExchangeChemistryCoupling {
     /*
         Equation 7 from Kim and Jo, 2021
     */
-    this(lua_State *L, int mode, GasModel gmodel)
-    {
-        m_mode_p = mode;
-        m_mode_q = -1;
-        mGmodel = gmodel;
-
-        mReactionIdx = getInt(L, -1, "reaction_index");
-        mSpeciesIdx  = gmodel.species_index(getString(L, -1, "p"));
-        lua_getfield(L, -1, "coupling_model");
-        mECC = createExchangeChemistryCoupling(L, gmodel, mode, mSpeciesIdx);
-        lua_pop(L, 1);
+    this(lua_State *L, int mode) {
+        this.D = getDouble(L, -1, "D");
+        this.K1 = getDouble(L, -1, "K1");
+        this.K2 = getDouble(L, -1, "K2");
+        this.K3 = getDouble(L, -1, "K3");
+        this.K4 = getDouble(L, -1, "K4");
+        this.K5 = getDouble(L, -1, "K5");
+        this.mode = mode;
     }
 
-    this(int mode, GasModel gmodel, int reactionidx, int speciesidx, ExchangeChemistryCoupling ECC)
-    {
-        m_mode_p = mode;
-        m_mode_q = -1;
-        mGmodel = gmodel;
-        mReactionIdx = reactionidx;
-        mSpeciesIdx = speciesidx;
-        mECC = ECC.dup();
+    this(double D, double K1, double K2, double K3, double K4, double K5, int mode) {
+        this.D = D;
+        this.K1 = K1;
+        this.K2 = K2;
+        this.K3 = K3;
+        this.K4 = K4;
+        this.K5 = K5;
+        this.mode = mode;
+    }
+
+    KimHTCEnergyLoss dup() {
+        return new KimHTCEnergyLoss(D, K1, K2, K3, K4, K5, mode);
+    }
+    
+    @nogc
+    number Gvanish(in GasState gs) {
+        number T = gs.T;
+        return D * exp(K1 / T + K2 + K3 * log(T) + K4 * T + K5 * T * T);
     }
 
     @nogc
-    override number rate(in GasState gs, in GasState gsEq, number[] molef, number[] numden, in ReactionMechanism rMech)
-    {
-    number rate = rMech.production_rate(mReactionIdx, mSpeciesIdx)*mECC.Gappear(gs)
-                - rMech.loss_rate(mReactionIdx, mSpeciesIdx)*mECC.Gvanish(gs);
-
-    // Convert from J/m3/s (energy density of a specific oscillator) 
-    // to J/kg/s (total vibrational energy of per unit mass of mixture)
-    return rate/gs.rho;
-    }
-    @nogc
-    override void evalRelaxationTime(in GasState gs, number[] molef, number[] numden)
-    {
-        // TODO: Maybe precompute some things here
-        return;
+    number Gappear(in GasState gs) {
+        number T = gs.T;
+        return D * exp(K1 / T + K2 + K3 * log(T) + K4 * T + K5 * T * T);
     }
 
 private:
-    int mReactionIdx, mSpeciesIdx;
-    GasModel mGmodel;
-    ExchangeChemistryCoupling mECC;
+    const double D;
+    const double K1, K2, K3, K4, K5;
+    int mode;
 }
 
 class MarroneTreanorDissociation : ExchangeChemistryCoupling {
@@ -360,8 +354,8 @@ ExchangeChemistryCoupling createExchangeChemistryCoupling(lua_State *L, GasModel
         return new MarroneTreanorDissociation(L, mode);
     case "PreferentialDissociation":
         return new PreferentialDissociation(L, mode);
-    case "Kim-Jo-CV":
-        return new KimJoCV(L, mode_p, gmodel);
+    case "KimHTCEnergyLoss":
+        return new KimHTCEnergyLoss(L, mode);
     case "ModifiedMarroneTreanorDissociation":
         return new ModifiedMarroneTreanorDissociation(L, mode);
     case "ImpartialChem":
