@@ -101,6 +101,60 @@ private:
     int m_q;
 }
 
+
+class LandauTeller2 : EnergyExchangeMechanism {
+public:
+
+    this(lua_State *L, int mode_p, int mode_q, GasModel gmodel)
+    {
+        string pspecies = getString(L, -1, "p");
+        string qspecies = getString(L, -1, "q");
+        m_p = gmodel.species_index(pspecies);
+        m_q = gmodel.species_index(qspecies);
+        m_mode_p = mode_p;
+        m_mode_q = mode_q;
+        mGmodel = gmodel;
+        lua_getfield(L, -1, "relaxation_time");
+        mRT = createRelaxationTime(L, m_p, m_q, gmodel);
+        lua_pop(L, 1);
+    }
+
+    this(int p, int q, int mode_p, int mode_q, RelaxationTime RT, GasModel gmodel)
+    {
+        m_p = p;
+        m_q = q;
+        m_mode_p = mode_p;
+        m_mode_q = mode_q;
+        mRT = RT.dup();
+        mGmodel = gmodel;
+    }
+
+    @nogc
+    override number rate(in GasState gs, in GasState gsEq, number[] molef, number[] numden, in ReactionMechanism rMech)
+    {
+        // If bath pressure is very small, then practically no relaxation
+        // occurs from collisions with particle q.
+        if (m_tau < 0.0) // signals very small mole fraction of q
+            return to!number(0.0);
+        number evStar = mGmodel.energyPerSpeciesInMode(gsEq, m_p, m_mode_p);
+        number ev = mGmodel.energyPerSpeciesInMode(gs, m_p, m_mode_p);
+        // NOTE 1. tau has already been weighted by colliding mole fractions.
+        //         This is taken care of as part of by using bath pressure in
+        //         calculation of relaxation time.
+        // NOTE 2. massf scaling is applied here to convert J/s/kg-of-species-ip to J/s/kg-of-mixture
+        double M_1 = 11.19750414;
+        number T_sh = ((2*1.4*M_1*M_1 - (1.4-1)) * ((1.4-1)*M_1*M_1 + 2) / ((1.4+1)*(1.4+1)*M_1*M_1)) * 293.0;
+        // number T_sh = 6500.0;
+        number s = 3.5*exp(-5000.0/T_sh);
+        return gs.massf[m_p] * (evStar - ev)  * (pow(fabs((T_sh - gs.T_modes[0])/(T_sh - 293.0)), s-1.0)) / m_tau;
+    }
+
+private:
+    int m_p;
+    int m_q;
+}
+
+
 class ParkPreferentialConst : EnergyExchangeMechanism {
     /*
         NASA Reference Publication 1232, A review of reaction rates and thermodynamic and 
@@ -428,6 +482,8 @@ EnergyExchangeMechanism createEnergyExchangeMechanism(lua_State *L, int mode_p, 
     switch (rateModel) {
     case "Landau-Teller":
         return new LandauTeller(L, mode_p, mode_q, gmodel);
+    case "Landau-Teller-Diffu":
+        return new LandauTeller2(L, mode_p, mode_q, gmodel);
     case "ElectronExchange":
         return new ElectronExchangeET(L, mode_p, gmodel);
     case "Park-Preferential-Const":
