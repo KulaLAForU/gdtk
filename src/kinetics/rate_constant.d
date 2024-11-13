@@ -153,7 +153,7 @@ public:
     override number eval(in GasState Q)
     {
         number T = Q.T;
-        return _A*pow(T, _n)*exp(-_C/T) / (exp(_A_1*(T/10000.0) + _A_2 + _A_3*log(10000.0/T) + _A_4*(10000.0/T) + _A_5 * pow(T / 10000.0, 2)));
+        return _A*pow(T, _n)*exp(-_C/T) / (exp(_A_1*(T/10000.0) + _A_2 + _A_3*log(10000.0/T) + _A_4*(10000.0/T) + _A_5 * pow(10000.0 / T, 2)));
     }
 
 private:
