@@ -5,25 +5,25 @@
  * Date: 2023-06-20
  */
 
-module fvcellio;
+module lmr.fvcellio;
 
-import std.stdio;
 import std.algorithm : findSplit, canFind, startsWith;
-import std.string : split;
 import std.conv : to;
 import std.format : format;
 import std.range.primitives : front, popFront;
+import std.stdio;
+import std.string : split;
 
+import geom : Grid_t, Vector3;
 import nm.number;
 import ntypes.complex;
 
-import globalconfig;
-import lmrexceptions : LmrException;
+import lmr.flowstate : FlowState;
 import lmr.fluidfvcell : FluidFVCell;
 import lmr.fvcell : FVCell;
-import solidfvcell : SolidFVCell;
-import flowstate : FlowState;
-import geom : Grid_t, Vector3;
+import lmr.globalconfig;
+import lmr.lmrexceptions : LmrException;
+import lmr.solid.solidfvcell : SolidFVCell;
 
 enum FieldVarsType { fluid, solid, limiter, residual, gradient };
 
@@ -115,6 +115,9 @@ string[] buildFluidVariables()
         variables ~= "T-" ~ cfg.gmodel_master.energy_mode_name(imode);
     }
     if (cfg.with_local_time_stepping || cfg.solverMode == SolverMode.steady) variables ~= "dt_local";
+    if (cfg.conductivity_model_name != "none") {
+        variables ~= "sigma";
+    }
     //
     return variables;
 } // end buildFluidVariables()
@@ -248,6 +251,7 @@ public:
         case "dt_local": return fcell.dt_local.re;
         case "e": return fcell.fs.gas.u.re;
         case "T": return fcell.fs.gas.T.re;
+        case "sigma": return fcell.fs.gas.sigma.re;
         default:
             throw new LmrException("Invalid selection for cell variable: " ~ var);
         }
@@ -304,6 +308,7 @@ public:
         case "dt_local": fcell.dt_local.re = value; return fcell.dt_local.re;
         case "e": fcell.fs.gas.u.re = value; return fcell.fs.gas.u.re;
         case "T": fcell.fs.gas.T.re = value; return fcell.fs.gas.T.re;
+        case "sigma": fcell.fs.gas.sigma.re = value; return fcell.fs.gas.sigma.re;
         default:
             throw new LmrException("Invalid selection for cell variable: " ~ var);
         }

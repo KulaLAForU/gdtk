@@ -9,34 +9,35 @@
 
 module lmr.fluidfvcell;
 
-import std.conv;
-import std.string;
-import std.array;
-import std.format;
-import std.stdio;
-import std.math;
 import std.algorithm;
-import ntypes.complex;
-import nm.number;
-import nm.bbla;
-import geom;
-import gas;
-import kinetics;
-import flowstate;
-import flowgradients;
-import conservedquantities;
-import fvvertex;
-import fvinterface;
-import globalconfig;
-import lsqinterp;
-import gas.fuel_air_mix;
-import globaldata : SimState;
-import turbulence;
-import lmr.fvcell : FVCell;
-import lmr.coredata : FluidCellData;
+import std.array;
+import std.conv;
+import std.format;
+import std.math;
+import std.stdio;
+import std.string;
 
+import gas.fuel_air_mix;
+import gas;
+import geom;
 import kinetics.chemistry_update;
 import kinetics.reaction_mechanism;
+import kinetics;
+import nm.bbla;
+import nm.number;
+import ntypes.complex;
+
+import lmr.conservedquantities;
+import lmr.coredata : FluidCellData;
+import lmr.flowgradients;
+import lmr.flowstate;
+import lmr.fvcell : FVCell;
+import lmr.fvinterface;
+import lmr.fvvertex;
+import lmr.globalconfig;
+import lmr.globaldata : SimState;
+import lmr.lsqinterp;
+import lmr.turbulence;
 
 version(debug_chem) {
     GasState savedGasState;
@@ -423,6 +424,11 @@ public:
             debug { msg ~= format("Unhandled number of vertices: %d", vtx.length); }
             throw new FlowSolverException(msg);
         } // end switch
+        fvcd.lengths[id][0] = iL;
+        fvcd.lengths[id][1] = jL;
+        fvcd.lengths[id][2] = 0.0;
+        fvcd.positions[id] = pos[gtl];
+
         // Cell Volume.
         if (axisymmetric) {
             // Volume per radian = centroid y-ordinate * cell area
@@ -441,6 +447,8 @@ public:
             }
             throw new FlowSolverException(msg);
         }
+        fvcd.volumes[id] = vol;
+        fvcd.areas[id] = xyplane_area;
         volume[gtl] = vol;
         areaxy[gtl] = xyplane_area;
         kLength = to!number(0.0);
@@ -481,6 +489,11 @@ public:
             debug { msg ~= format("Unhandled number of vertices: %d", vtx.length); }
             throw new FlowSolverException(msg);
         } // end switch
+        fvcd.volumes[id] = volume[gtl];
+        fvcd.positions[id] = pos[gtl];
+        fvcd.lengths[id][0] = iL;
+        fvcd.lengths[id][1] = jL;
+        fvcd.lengths[id][2] = kL;
         if (volume[gtl] <= 0.0) {
             debug {
                 msg ~= format("Invalid volume %g for cell %d in block %d at pos %s",
@@ -1127,6 +1140,13 @@ public:
         auto gmodel = myConfig.gmodel;
         fs.mu_t = myConfig.turb_model.turbulent_viscosity(*fs, *grad, pos[0].y, dwall);
         fs.k_t = myConfig.turb_model.turbulent_conductivity(*fs, gmodel);
+    }
+    
+    @nogc
+    void evaluate_electrical_conductivity()
+    {
+        auto gmodel = myConfig.gmodel;
+        fs.gas.sigma = myConfig.conductivity_model(fs.gas, pos[0], gmodel);
     }
 
     /*

@@ -6,27 +6,29 @@
  * Version: Initial cut.
  */
 
-module luaflowstate;
+module lmr.luawrap.luaflowstate;
 
 import std.algorithm;
 import std.array;
+import std.conv;
 import std.format;
 import std.stdio;
 import std.string;
-import std.conv;
 import std.traits;
+
 import gzip;
+
+import gas.luagas_model;
+import gas;
+import geom.luawrap;
+import geom;
+import nm.number;
+import ntypes.complex;
 import util.lua;
 import util.lua_service;
-import ntypes.complex;
-import nm.number;
 
-import gas;
-import gas.luagas_model;
-import flowstate;
-import geom;
-import geom.luawrap;
-import globalconfig;
+import lmr.flowstate;
+import lmr.globalconfig;
 
 // Name for FlowState objects in Lua scripts are a pure Lua play,
 // however, we wish to provide a few FlowState-related functions
@@ -38,7 +40,8 @@ immutable string[] validFlowStateFields = ["p", "T", "T_modes", "p_e",
                                            "mu", "k",
                                            "velx", "vely", "velz",
                                            "Bx", "By", "Bz", "psi", "divB",
-                                           "turb", "mu_t", "k_t", "S"];
+                                           "turb", "mu_t", "k_t", "S",
+                                           "tke", "omega", "nu_hat"];
 static const(FlowState*)[] flowStateStore;
 
 FlowState* checkFlowState(lua_State* L, int index)
@@ -252,6 +255,7 @@ The value should be a number.`;
     double[] turb;
     lua_getfield(L, tblindx, "turb");
     if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
         auto tm = GlobalConfig.turb_model;
         turb.length = tm.nturb;
         foreach(it; 0 .. tm.nturb){
@@ -367,6 +371,7 @@ void pushFlowStateToTable(lua_State* L, int tblIdx, in FlowState fs, GasModel gm
     mixin(pushGasVar("rho"));
     mixin(pushGasVar("mu"));
     mixin(pushGasVar("k", "k"));
+    mixin(pushGasVar("sigma"));
     version(multi_T_gas) {
         mixin(pushGasVarArray("k_modes"));
     }

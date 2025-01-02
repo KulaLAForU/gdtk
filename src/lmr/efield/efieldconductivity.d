@@ -5,19 +5,20 @@
  * Version: 2021-05-24
  */
 
-module efieldconductivity;
+module lmr.efield.efieldconductivity;
 
-import std.stdio;
+import std.conv;
 import std.format;
 import std.math;
-import std.conv;
+import std.stdio;
 
+import gas.gas_model;
+import gas.gas_state;
+import gas.physical_constants;
 import geom;
 import nm.number;
-import mass_diffusion;
-import gas.gas_state;
-import gas.gas_model;
-import gas.physical_constants;
+
+import lmr.mass_diffusion;
 
 interface ConductivityModel{
     @nogc number opCall(ref const(GasState) gs, const Vector3 pos, GasModel gm);
@@ -50,7 +51,13 @@ class RaizerConductivity : ConductivityModel{
     this() {}
     @nogc final number opCall(ref const(GasState) gs, const Vector3 pos, GasModel gm){
         version(multi_T_gas) {
-            double Tref = gs.T_modes[0].re; // Hmmm. This will crash in single temp
+            double Tref;
+            if (gm.n_modes == 0) {
+                Tref = gs.T.re;
+            } else {
+                size_t iTe = gm.n_modes-1;
+                Tref = gs.T_modes[iTe].re;
+            }
         } else {
             double Tref = gs.T.re;
         }
@@ -123,7 +130,7 @@ ConductivityModel create_conductivity_model(string name, GasModel gm){
         conductivity_model = new DiffusionConductivity(gm);
         break;
     case "none":
-        throw new Error("User has asked for solve_electric_field but failed to specify a conductivity model.");
+        break; //throw new Error("User has asked for solve_electric_field but failed to specify a conductivity model.");
     default:
         string errMsg = format("The conductivity model '%s' is not available.", name);
         throw new Error(errMsg);

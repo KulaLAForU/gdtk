@@ -2,46 +2,48 @@
 // Class for unstructured blocks of cells, for use within Eilmer4.
 // Peter J. 2014-11-07 first serious cut.
 
-module ufluidblock;
+module lmr.ufluidblock;
 
+import std.algorithm;
+import std.array;
 import std.conv;
 import std.file;
-import std.json;
-import std.stdio;
 import std.format;
-import std.string;
-import std.array;
+import std.json;
 import std.math;
-import std.algorithm;
 import std.range;
+import std.stdio;
+import std.string;
 
+import gzip;
+
+import gas.luagas_model;
+import gas;
+import geom.luawrap.luausgrid;
+import geom;
+import kinetics;
+import nm;
+import util.json_helper;
 import util.lua;
 import util.lua_service;
-import gas.luagas_model;
-import json_helper;
-import lua_helper;
-import gzip;
-import geom;
-import gas;
-import kinetics;
-import globalconfig;
-import globaldata;
-import flowstate;
-import fluxcalc;
-import flowgradients;
-import fvvertex;
-import fvinterface;
-import lmr.fluidfvcell : FluidFVCell;
+
+import lmr.bc;
+import lmr.block;
 import lmr.coredata;
-import lsqinterp;
-import fluidblock;
-import bc;
-import grid_motion;
-import grid_motion_udf;
-import geom.luawrap.luausgrid;
-import luaflowstate;
-import nm;
-import block;
+import lmr.flowgradients;
+import lmr.flowstate;
+import lmr.fluidblock;
+import lmr.fluidfvcell : FluidFVCell;
+import lmr.fluxcalc;
+import lmr.fvinterface;
+import lmr.fvvertex;
+import lmr.globalconfig;
+import lmr.globaldata;
+import lmr.grid_motion;
+import lmr.grid_motion_udf;
+import lmr.lsqinterp;
+import lmr.lua_helper;
+import lmr.luawrap.luaflowstate;
 
 class UFluidBlock: FluidBlock {
 public:
@@ -839,7 +841,13 @@ public:
     }
 
     @nogc
-    override void convective_flux_phase0(bool allow_high_order_interpolation, size_t gtl=0,
+    override void convective_flux_phase0(bool allow_high_order_interpolation, size_t gtl=0)
+    {
+        convective_flux_phase0_legacy(allow_high_order_interpolation, gtl);
+    }
+
+    @nogc
+    override void convective_flux_phase0_legacy(bool allow_high_order_interpolation, size_t gtl=0,
                                          FluidFVCell[] cell_list = [], FVInterface[] iface_list = [], FVVertex[] vertex_list = [])
     // Compute gradients of flow quantities for higher-order reconstruction, if required.
     // These will be used, later, in the convective flux calculation.

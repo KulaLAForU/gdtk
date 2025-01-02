@@ -15,52 +15,53 @@
  *   2024-02-11: Moved to lmr5, introduced solver_mode as config option.
  */
 
-module globalconfig;
+module lmr.globalconfig;
 
+import core.stdc.stdlib : exit;
+import std.algorithm;
+import std.array;
 import std.conv;
+import std.file;
+import std.format;
+import std.json;
 import std.stdio;
 import std.string;
 import std.typecons;
-import core.stdc.stdlib : exit;
-import std.json;
-import std.file;
-import std.array;
-import std.format;
-import std.algorithm;
 
-import util.lua;
-import util.lua_service;
+import gas.luagas_model;
+import gas;
+import geom.luawrap;
+import geom;
+import kinetics;
+import lmr.lua_helper;
 import nm.luabbla;
 import nm.schedule;
-import lua_helper;
-import gas;
-import gas.luagas_model;
-import kinetics;
-import geom;
-import geom.luawrap;
+import util.json_helper;
+import util.lua;
+import util.lua_service;
 version (opencl_gpu_chem) {
     import opencl_gpu_chem;
 }
 version (cuda_gpu_chem) {
      import cuda_gpu_chem;
 }
-import lmrconfig;
-import json_helper;
-import globaldata;
-import flowstate;
-import conservedquantities;
-import fluidblock;
-import fluidblockarray;
-import sfluidblock: SFluidBlock;
-import ufluidblock: UFluidBlock;
-import ssolidblock;
-import bc;
-import user_defined_source_terms;
-import solid_udf_source_terms;
-import grid_motion;
-import grid_motion_udf;
-import mass_diffusion;
-import turbulence;
+import lmr.bc;
+import lmr.conservedquantities;
+import lmr.efield.efieldconductivity;
+import lmr.flowstate;
+import lmr.fluidblock;
+import lmr.fluidblockarray;
+import lmr.globaldata;
+import lmr.grid_motion;
+import lmr.grid_motion_udf;
+import lmr.lmrconfig;
+import lmr.mass_diffusion;
+import lmr.sfluidblock : SFluidBlock;
+import lmr.solid.solid_udf_source_terms;
+import lmr.solid.ssolidblock;
+import lmr.turbulence;
+import lmr.ufluidblock : UFluidBlock;
+import lmr.user_defined_source_terms;
 version(FSI) { import fsi; }
 
 // --------------------------------
@@ -1174,7 +1175,7 @@ final class GlobalConfig {
     // Activate the electric field solver by Nick Gibbons
     shared static int electric_field_count = 1000000000;
     shared static bool solve_electric_field = false;
-    shared static string field_conductivity_model = "none";
+    shared static string conductivity_model_name = "none";
 
     // Parameters controlling viscous/molecular transport
     //
@@ -1242,6 +1243,7 @@ final class GlobalConfig {
     shared static double transient_mu_t_factor = 1.0;
     shared static double freestream_turbulent_intensity = 0.01;
     static TurbulenceModel turb_model;
+    static ConductivityModel conductivity_model;
     static BlockZone[] turbulent_zones;
     //
     // Indicate presence of user-defined source terms
@@ -1469,7 +1471,7 @@ public:
     double divB_damping_length;
     int electric_field_count;
     bool solve_electric_field;
-    string field_conductivity_model;
+    string conductivity_model_name;
     //
     bool viscous;
     bool use_viscosity_from_cells;
@@ -1509,6 +1511,7 @@ public:
     double transient_mu_t_factor;
     double freestream_turbulent_intensity;
     TurbulenceModel turb_model;
+    ConductivityModel conductivity_model;
     BlockZone[] turbulent_zones;
     //
     bool udf_source_terms;
@@ -1655,7 +1658,7 @@ public:
         divB_damping_length = cfg.divB_damping_length;
         electric_field_count = cfg.electric_field_count;
         solve_electric_field = cfg.solve_electric_field;
-        field_conductivity_model = cfg.field_conductivity_model;
+        conductivity_model_name = cfg.conductivity_model_name;
         //
         viscous = cfg.viscous;
         use_viscosity_from_cells = cfg.use_viscosity_from_cells;
@@ -1695,6 +1698,7 @@ public:
         transient_mu_t_factor = cfg.transient_mu_t_factor;
         freestream_turbulent_intensity = cfg.freestream_turbulent_intensity;
         turb_model = cfg.turb_model.dup;
+        conductivity_model = create_conductivity_model(cfg.conductivity_model_name, cfg.gmodel_master);
         foreach (bz; cfg.turbulent_zones) { turbulent_zones ~= new BlockZone(bz); }
         //
         udf_source_terms = cfg.udf_source_terms;
@@ -2011,7 +2015,7 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_double("divB_damping_length", "divB_damping_length"));
     mixin(update_int("electric_field_count", "electric_field_count"));
     mixin(update_bool("solve_electric_field", "solve_electric_field"));
-    mixin(update_string("field_conductivity_model", "field_conductivity_model"));
+    mixin(update_string("conductivity_model_name", "conductivity_model_name"));
 
     // Checking of constraints.
     // The following checks/overrides must happen after the relevant config elements
@@ -2100,7 +2104,7 @@ void set_config_for_core(JSONValue jsonData)
         writeln("  divB_damping_length: ", cfg.divB_damping_length);
         writeln("  electric_field_count: ", cfg.electric_field_count);
         writeln("  solve_electric_field: ", cfg.solve_electric_field);
-        writeln("  field_conductivity_model: ", cfg.field_conductivity_model);
+        writeln("  conductivity_model_name: ", cfg.conductivity_model_name);
     }
     configCheckPoint2();
     //
@@ -2136,6 +2140,7 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_double("transient_mu_t_factor", "transient_mu_t_factor"));
     mixin(update_double("freestream_turbulent_intensity", "freestream_turbulent_intensity"));
     cfg.turb_model = init_turbulence_model(cfg.turbulence_model_name, jsonData);
+    cfg.conductivity_model =  create_conductivity_model(cfg.conductivity_model_name, cfg.gmodel_master);
     if (cfg.verbosity_level > 1) {
         writeln("  viscous: ", cfg.viscous);
         writeln("  use_viscosity_from_cells: ", cfg.use_viscosity_from_cells);

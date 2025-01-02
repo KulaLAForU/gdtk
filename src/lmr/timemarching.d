@@ -7,67 +7,88 @@
  *   2024-02-07
  */
 
-module timemarching;
+module lmr.timemarching;
 
-import std.stdio : write, writeln, writefln, stdout, File;
-import std.datetime : DateTime, Clock;
 import core.memory : GC;
-import std.conv : to;
-import std.math : FloatingPointControl;
-import std.parallelism : parallel;
 import std.algorithm : min;
-import std.file;
-import std.math;
-import std.format : format, formattedWrite;
 import std.array : appender, split;
+import std.conv : to;
+import std.datetime : DateTime, Clock;
+import std.file;
+import std.format : format, formattedWrite;
+import std.math : FloatingPointControl;
+import std.math;
+import std.parallelism : parallel;
+import std.stdio : write, writeln, writefln, stdout, File;
 import std.string : splitLines;
+
 import dyaml;
 
+import nm.number : number;
 import ntypes.complex;
 import util.time_utils : timeStringToSeconds;
-import nm.number : number;
-import conservedquantities : new_ConservedQuantities;
-import simcore : check_run_time_configuration,
-       synchronize_corner_coords_for_all_blocks,
-       call_UDF_at_timestep_start,
-       call_UDF_at_timestep_end,
-       call_UDF_at_write_to_file,
-       update_ch_for_divergence_cleaning,
-       set_mu_and_k,
-       chemistry_step,
-       compute_Linf_residuals,
-       compute_L2_residual,
-       compute_mass_balance;
-import simcore_gasdynamic_step : sts_gasdynamic_explicit_increment_with_fixed_grid,
-       gasdynamic_explicit_increment_with_fixed_grid,
-       gasdynamic_implicit_increment_with_fixed_grid,
-       gasdynamic_explicit_increment_with_moving_grid,
-       gasdynamic_implicit_increment_with_moving_grid,
-       determine_time_step_size,
-       local_dt_allow,
-       local_dt_allow_parab,
-       local_cfl_max,
-       local_invalid_cell_count;
-import simcore_solid_step : determine_solid_time_step_size, solid_step;
+import nm.schedule : Schedule;
 
-import lmrexceptions;
-import lmrconfig;
-
-import globalconfig;
-import globaldata;
-import init;
-import fileutil : ensure_directory_is_present;
-import lmr.loads : computeRunTimeLoads,
-       init_current_loads_indx_dir,
-       wait_for_current_indx_dir,
-       writeLoadsToFile,
-       count_written_loads,
-       update_loads_metadata_file;
+import lmr.conservedquantities : new_ConservedQuantities;
+import lmr.fileutil : ensure_directory_is_present;
 import lmr.fvcell : FVCell;
+import lmr.globalconfig;
+import lmr.globaldata;
 import lmr.history : initHistoryCells, writeHistoryCellsToFiles;
+import lmr.init;
+import lmr.lmrconfig;
+import lmr.lmrexceptions;
+import lmr.simcore_solid_step : determine_solid_time_step_size, solid_step;
+import lmr.loads : 
+    computeRunTimeLoads,
+    count_written_loads,
+    init_current_loads_indx_dir,
+    update_loads_metadata_file,
+    wait_for_current_indx_dir,
+    writeLoadsToFile;
+import lmr.simcore : 
+    check_run_time_configuration,
+    call_UDF_at_timestep_end,
+    call_UDF_at_timestep_start,
+    call_UDF_at_write_to_file,
+    chemistry_step,
+    compute_L2_residual,
+    compute_Linf_residuals,
+    compute_mass_balance,
+    set_mu_and_k,
+    synchronize_corner_coords_for_all_blocks,
+    update_ch_for_divergence_cleaning;
+import lmr.simcore_gasdynamic_step : 
+    determine_time_step_size,
+    gasdynamic_explicit_increment_with_fixed_grid,
+    gasdynamic_explicit_increment_with_moving_grid,
+    gasdynamic_implicit_increment_with_fixed_grid,
+    gasdynamic_implicit_increment_with_moving_grid,
+    local_cfl_max,
+    local_dt_allow,
+    local_dt_allow_parab,
+    local_invalid_cell_count,
+    sts_gasdynamic_explicit_increment_with_fixed_grid;
 
 version(mpi_parallel) {
     import mpi;
+}
+
+double nextXxxxTime(double now, Schedule!double dt_schedule)
+{
+    // Returns the absolute simulation time at which the next snapshot should be made.
+    // Even if we have restarted the simulation from some intermediate time,
+    // we should continue to get the originally-requested instances.
+    double t = 0;
+    while (t <= now) { t += dt_schedule.get_value(now); }
+    return t;
+}
+
+double nextXxxxTime(double now, double dt)
+{
+    double t = 0;
+    while (t <= now) { t += dt; }
+    return t;
 }
 
 void initTimeMarchingSimulation(int snapshotStart, int maxCPUs, int threadsPerMPITask, string maxWallClock)
@@ -121,6 +142,7 @@ void initTimeMarchingSimulation(int snapshotStart, int maxCPUs, int threadsPerMP
     initMappedCellDataExchange();
     initGhostCellGeometry();
     initLeastSquaresStencils();
+    initStructuredStencilData();
 
     if ((cfg.interpolation_order > 1) &&
         ((cfg.unstructured_limiter == UnstructuredLimiter.hvenkat) ||
@@ -295,9 +317,9 @@ int integrateInTime(double targetTimeAsRequested)
     }
     SimState.target_time = (GlobalConfig.block_marching) ? targetTimeAsRequested : GlobalConfig.max_time;
     // The next time for output...
-    SimState.t_plot = SimState.time + GlobalConfig.dt_plot_schedule.get_value(SimState.time);
-    SimState.t_history = SimState.time + GlobalConfig.dt_history;
-    SimState.t_loads = SimState.time + GlobalConfig.dt_loads;
+    SimState.t_plot = nextXxxxTime(SimState.time, GlobalConfig.dt_plot_schedule);
+    SimState.t_history = nextXxxxTime(SimState.time, GlobalConfig.dt_history);
+    SimState.t_loads = nextXxxxTime(SimState.time, GlobalConfig.dt_loads);
     //
     if (GlobalConfig.viscous) {
         // We have requested viscous effects but their application may be delayed
@@ -574,7 +596,7 @@ int integrateInTime(double targetTimeAsRequested)
                 writeSnapshotFiles_timemarching();
                 if (GlobalConfig.udf_supervisor_file.length > 0) { call_UDF_at_write_to_file(); }
                 SimState.output_just_written = true;
-                SimState.t_plot = SimState.t_plot + GlobalConfig.dt_plot_schedule.get_value(SimState.time);
+                SimState.t_plot = nextXxxxTime(SimState.time, GlobalConfig.dt_plot_schedule);
                 GC.collect();
                 GC.minimize();
             }
@@ -605,7 +627,7 @@ int integrateInTime(double targetTimeAsRequested)
                 }
                 writeHistoryCellsToFiles(SimState.time);
                 SimState.history_just_written = true;
-                SimState.t_history = SimState.t_history + GlobalConfig.dt_history;
+                SimState.t_history = nextXxxxTime(SimState.time, GlobalConfig.dt_history);
                 GC.collect();
                 GC.minimize();
             }
@@ -616,7 +638,7 @@ int integrateInTime(double targetTimeAsRequested)
                 writeLoadsFiles_timemarching();
                 SimState.loads_just_written = true;
                 SimState.current_loads_tindx = SimState.current_loads_tindx + 1;
-                SimState.t_loads = SimState.t_loads + GlobalConfig.dt_loads;
+                SimState.t_loads = nextXxxxTime(SimState.time, GlobalConfig.dt_loads);
                 GC.collect();
                 GC.minimize();
             }
