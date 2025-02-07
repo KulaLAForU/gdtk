@@ -41,7 +41,9 @@ NewtonKrylovGlobalConfigHidden = {
    use_residual_smoothing = false,
 
    -- linear solver and preconditioner
+   use_fgmres = false,
    max_linear_solver_iterations = 10,
+   max_fgmres_preconditioning_iterations = 10,
    max_linear_solver_restarts = 0,
    use_scaling = true,
    use_real_valued_frechet_derivative = false,
@@ -140,6 +142,8 @@ local function writeNKConfigToFile(nkConfig, nkPhases, fileName)
    f:write(string.format('"use_residual_smoothing": %s,\n', tostring(nkConfig.use_residual_smoothing)))
    -- linear solver and preconditioner
    f:write(string.format('"max_linear_solver_iterations": %d,\n', nkConfig.max_linear_solver_iterations))
+   f:write(string.format('"use_fgmres": %s,\n', tostring(nkConfig.use_fgmres)))
+   f:write(string.format('"max_fgmres_preconditioning_iterations": %d,\n', nkConfig.max_fgmres_preconditioning_iterations))
    f:write(string.format('"max_linear_solver_restarts": %d,\n', nkConfig.max_linear_solver_restarts))
    f:write(string.format('"use_scaling": %s,\n', tostring(nkConfig.use_scaling)))
    f:write(string.format('"use_real_valued_frechet_derivative": %s,\n', tostring(nkConfig.use_real_valued_frechet_derivative)))
@@ -188,6 +192,7 @@ NewtonKrylovPhaseDefaults = {
 
    -- Linear solver control
    linear_solve_tolerance = 0.01,
+   fgmres_preconditioning_solve_tolerance = 0.01,
 
    -- Auto CFL control
    use_auto_cfl = false,
@@ -197,6 +202,11 @@ NewtonKrylovPhaseDefaults = {
    auto_cfl_exponent = 0.75,
    limit_on_cfl_increase_ratio = 2.0,
    limit_on_cfl_decrease_ratio = 0.1,
+
+   -- shock-fitting
+   grid_motion_enabled = false,
+   shock_fitting_allow_interpolation = true,
+   shock_fitting_scale_factor = 0.5,
 }
 
 local NewtonKrylovPhases = {}
@@ -255,6 +265,7 @@ function NewtonKrylovPhase:tojson()
    str = str .. string.format('    "frozen_limiter_for_residual": %s,\n', tostring(self.frozen_limiter_for_residual))
    str = str .. string.format('    "frozen_limiter_for_jacobian": %s,\n', tostring(self.frozen_limiter_for_jacobian))
    str = str .. string.format('    "linear_solve_tolerance": %.18e,\n', self.linear_solve_tolerance)
+   str = str .. string.format('    "fgmres_preconditioning_solve_tolerance": %.18e,\n', self.fgmres_preconditioning_solve_tolerance)
    str = str .. string.format('    "use_auto_cfl": %s,\n', tostring(self.use_auto_cfl))
    if self.use_auto_cfl then
       str = str .. string.format('    "threshold_relative_residual_for_cfl_growth": %.18e,\n', self.threshold_relative_residual_for_cfl_growth)
@@ -264,6 +275,9 @@ function NewtonKrylovPhase:tojson()
       str = str .. string.format('    "limit_on_cfl_increase_ratio": %.18e,\n', self.limit_on_cfl_increase_ratio)
       str = str .. string.format('    "limit_on_cfl_decrease_ratio": %.18e,\n', self.limit_on_cfl_decrease_ratio)
    end
+   str = str .. string.format('    "grid_motion_enabled": %s,\n', tostring(self.grid_motion_enabled))
+   str = str .. string.format('    "shock_fitting_allow_interpolation": %s,\n', tostring(self.shock_fitting_allow_interpolation))
+   str = str .. string.format('    "shock_fitting_scale_factor": %s,\n', tostring(self.shock_fitting_scale_factor))
    str = str .. '    "dummy_entry_without_trailing_comma": 0\n' -- no comma on last entry
    str = str .. '}'
    return str

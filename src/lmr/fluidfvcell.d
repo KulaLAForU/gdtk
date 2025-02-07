@@ -112,6 +112,7 @@ public:
     bool contains_flow_data;
     bool is_interior_to_domain; // true if the cell is interior to the flow domain
     bool allow_k_omega_update = true; // turbulent wall functions may turn this off
+    bool is_in_shock_fitting_boundary = false;
     FluidCellData* fvcd; // Pointer to block densified storage structure
     FlowState* fs; // Flow properties
     ConservedQuantities[] U;  // Conserved flow quantities for the update stages.
@@ -859,6 +860,12 @@ public:
             foreach(i; 0 .. iface.length) {
                 number area = outsign[i] * iface[i].area[gtl];
                 surface_integral -= iface[i].F[j] * area;
+
+                // GCL for steady-state
+                if ((myConfig.solverMode == SolverMode.steady) &&
+                    (myConfig.grid_motion != GridMotion.none)) {
+                    surface_integral -= U[ftl][j] * dot(iface[i].n, iface[i].gvel) * area;
+                }
             }
             // Then evaluate the derivatives of conserved quantities.
             // Conserved quantities are stored per-unit-volume.

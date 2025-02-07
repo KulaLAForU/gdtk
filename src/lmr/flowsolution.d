@@ -609,13 +609,14 @@ public:
         bool add_cyl_coords = canFind(addVarsList, "cyl"); // cylindrical coordinates, r and theta
         bool add_mach = canFind(addVarsList, "mach");
         bool add_pitot_p = canFind(addVarsList, "pitot");
-        bool add_total_p = canFind(addVarsList, "total-p");
-        bool add_total_h = canFind(addVarsList, "total-h");
-        bool add_total_T = canFind(addVarsList, "total-T");
+        // Accept some aliases
+        bool add_total_p = canFind(addVarsList, "total-p") || canFind(addVarsList, "total_p") || canFind(addVarsList, "total-pressure");
+        bool add_total_h = canFind(addVarsList, "total-h") || canFind(addVarsList, "total_h") || canFind(addVarsList, "total-enthalpy");
+        bool add_total_T = canFind(addVarsList, "total-T") || canFind(addVarsList, "total_T") || canFind(addVarsList, "total-temperature");
         bool add_enthalpy = canFind(addVarsList, "enthalpy");
         bool add_entropy = canFind(addVarsList, "entropy");
-        bool add_molef = canFind(addVarsList, "molef");
-        bool add_conc = canFind(addVarsList, "conc"); // concentrations
+        bool add_molef = canFind(addVarsList, "molef") || canFind(addVarsList, "mole-fractions");
+        bool add_conc = canFind(addVarsList, "conc") || canFind(addVarsList, "concentrations");
         VibSpecificNitrogen gmodel2 = cast(VibSpecificNitrogen) gmodel;
         bool add_Tvib = gmodel2 && canFind(addVarsList, "Tvib");
         //
@@ -778,7 +779,7 @@ public:
                 foreach (isp; 0 .. Q.massf.length) {
                     Q.massf[isp] = _data[i][variableIndex[massf_names[isp]]];
                 }
-                Q.p = p; Q.T = T; Q.rho = rho; Q.u = _data[i][variableIndex["u"]];
+                Q.p = p; Q.T = T; Q.rho = rho; Q.u = _data[i][variableIndex["e"]];
                 double enthalpy = gmodel.enthalpy(Q).re;
                 _data[i] ~= enthalpy;
             }

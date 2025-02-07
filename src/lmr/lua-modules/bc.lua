@@ -83,9 +83,19 @@ function FlowStateCopy:tojson()
    return str
 end
 
-FlowStateCopyFromProfile = GhostCellEffect:new{filename=nil, match=nil}
-FlowStateCopyFromProfile.type = "flowstate_copy_from_profile"
-function FlowStateCopyFromProfile:tojson()
+FlowStateCopyFromStaticProfile = GhostCellEffect:new{filename=nil, match=nil}
+FlowStateCopyFromStaticProfile.type = "flowstate_copy_from_static_profile"
+function FlowStateCopyFromStaticProfile:tojson()
+   local str = string.format('          {"type": "%s",', self.type)
+   str = str .. string.format(' "filename": "%s",', self.filename)
+   str = str .. string.format(' "match": "%s"', self.match)
+   str = str .. '}'
+   return str
+end
+
+FlowStateCopyFromTransientProfile = GhostCellEffect:new{filename=nil, match=nil}
+FlowStateCopyFromTransientProfile.type = "flowstate_copy_from_transient_profile"
+function FlowStateCopyFromTransientProfile:tojson()
    local str = string.format('          {"type": "%s",', self.type)
    str = str .. string.format(' "filename": "%s",', self.filename)
    str = str .. string.format(' "match": "%s"', self.match)
@@ -275,9 +285,19 @@ function FlowStateCopyToInterface:tojson()
    return str
 end
 
-FlowStateCopyFromProfileToInterface = BoundaryInterfaceEffect:new{filename=nil, match=nil}
-FlowStateCopyFromProfileToInterface.type = "flow_state_copy_from_profile_to_interface"
-function FlowStateCopyFromProfileToInterface:tojson()
+FlowStateCopyFromStaticProfileToInterface = BoundaryInterfaceEffect:new{filename=nil, match=nil}
+FlowStateCopyFromStaticProfileToInterface.type = "flow_state_copy_from_static_profile_to_interface"
+function FlowStateCopyFromStaticProfileToInterface:tojson()
+   local str = string.format('          {"type": "%s",', self.type)
+   str = str .. string.format(' "filename": "%s",', self.filename)
+   str = str .. string.format(' "match": "%s"', self.match)
+   str = str .. '}'
+   return str
+end
+
+FlowStateCopyFromTransientProfileToInterface = BoundaryInterfaceEffect:new{filename=nil, match=nil}
+FlowStateCopyFromTransientProfileToInterface.type = "flow_state_copy_from_transient_profile_to_interface"
+function FlowStateCopyFromTransientProfileToInterface:tojson()
    local str = string.format('          {"type": "%s",', self.type)
    str = str .. string.format(' "filename": "%s",', self.filename)
    str = str .. string.format(' "match": "%s"', self.match)
@@ -1277,9 +1297,34 @@ function InFlowBC_StaticProfile:new(o)
    o.is_wall_with_viscous_effects = false
    o.match = o.match or "xyz-to-xyz"
    o.filename = o.filename or o.fileName
-   o.preReconAction = { FlowStateCopyFromProfile:new{filename=o.filename, match=o.match} }
+   o.preReconAction = { FlowStateCopyFromStaticProfile:new{filename=o.filename, match=o.match} }
    o.preSpatialDerivActionAtBndryFaces = {
-      FlowStateCopyFromProfileToInterface:new{filename=o.filename, match=o.match}
+      FlowStateCopyFromStaticProfileToInterface:new{filename=o.filename, match=o.match}
+   }
+   o.is_configured = true
+   return o
+end
+
+InFlowBC_TransientProfile = BoundaryCondition:new()
+InFlowBC_TransientProfile.type = "inflow_transient_profile"
+function InFlowBC_TransientProfile:new(o)
+   local flag = type(self)=='table' and self.type=='inflow_transient_profile'
+   if not flag then
+      error("Make sure that you are using InFlowBC_TransientProfile:new{}"..
+               " and not InFlowBC_TransientProfile.new{}", 2)
+   end
+   o = o or {}
+   flag = checkAllowedNames(o, {"filename", "fileName", "match", "label", "group","field_bc"})
+   if not flag then
+      error("Invalid name for item supplied to InFlowBC_TransientProfile constructor.", 2)
+   end
+   o = BoundaryCondition.new(self, o)
+   o.is_wall_with_viscous_effects = false
+   o.match = o.match or "xyz-to-xyz"
+   o.filename = o.filename or o.fileName
+   o.preReconAction = { FlowStateCopyFromTransientProfile:new{filename=o.filename, match=o.match} }
+   o.preSpatialDerivActionAtBndryFaces = {
+      FlowStateCopyFromTransientProfileToInterface:new{filename=o.filename, match=o.match}
    }
    o.is_configured = true
    return o
@@ -1386,7 +1431,10 @@ function InFlowBC_ShockFitting:new(o)
    o = BoundaryCondition.new(self, o)
    o.is_wall_with_viscous_effects = false
    o.convective_flux_computed_in_bc = true
-   o.ghost_cell_data_available = false
+   o.ghost_cell_data_available = true
+   o.preReconAction = {
+      FlowStateCopy:new{flowState=o.flowState, x0=o.x0, y0=o.y0, z0=o.z0, r=o.r}
+   }
    o.postConvFluxAction = { ConstFlux:new{flowState=o.flowState, x0=o.x0, y0=o.y0, z0=o.z0, r=o.r} }
    o.preSpatialDerivActionAtBndryFaces = { CopyCellData:new() }
    o.is_configured = true

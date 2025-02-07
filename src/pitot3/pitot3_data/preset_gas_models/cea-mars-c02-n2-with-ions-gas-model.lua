@@ -20,6 +20,6 @@ CEAGas = {
   speciesList = {'CO2','C3O2','C2O','CO','CN','NO','NO2','O3','O2','O','C3','C2','C','N2','N','O2+','C2+','CO+','NO+','C+','C-','O+','O-','N+','e-'},
   reactants = {CO2=0.96,N2=0.04},
   inputUnits = "moles",
-  withIons = false,
+  withIons = true,
   trace = 1.0e-10
 }

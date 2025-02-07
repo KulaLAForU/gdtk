@@ -16,6 +16,8 @@ import std.json;
 import std.math;
 import std.stdio;
 import std.string;
+import std.file;
+import std.zip;
 
 import gas;
 import geom;
@@ -24,7 +26,7 @@ import nm.number;
 import ntypes.complex;
 import util.json_helper;
 
-import lmr.fvcellio : scan_cell_data_from_fixed_order_string;
+import lmr.lmrexceptions : LmrException;
 import lmr.globalconfig;
 
 @nogc
@@ -427,9 +429,10 @@ version(complex_numbers) {
 
 } // end class FlowState
 
-class FlowProfile {
+
+class StaticFlowProfile {
     // For use in the classes that implement the InflowBC_StaticProfile boundary condition.
-    // GhostCellFlowStateCopyFromProfile, BIE_FlowStateCopyFromProfile
+    // GhostCellFlowStateCopyFromStaticProfile, BIE_FlowStateCopyFromStaticProfile
     // There are non-obvious options for the match parameter in the constructor call.
     // See the switch statement in the compute_distance() function for some hints.
 
@@ -443,40 +446,97 @@ public:
     // This position will only change for moving-grid simulations and we will not try
     // to deal with that complication.
 
+    // Construct a StaticFlowProfile from a data file.
+    //
+    // Format will be a header line followed by one sample point per line.
+    // The header line will specify the names of the columns and, at a minimum, be:
+    // pos.x pos.y p T vel.x vel.y
+    // The data lines will have numerical values for the corresponding quantities.
+    // This format should be compatible with that provided by the sliced output
+    // of the postprocessing programs and also be compatible with gnuplot.
     this (string fileName, string match)
     {
         this.fileName = fileName;
         this.posMatch = match;
+        //
+        // Some context for the expected flow data.
+        alias cfg = GlobalConfig;
+        GasModel gmodel = cfg.gmodel_master;
+        size_t n_species = gmodel.n_species;
+        size_t n_modes = gmodel.n_modes;
+        size_t n_turb = cfg.turb_model.nturb;
+        //
+        string[] expected_names = ["pos.x", "pos.y", "p", "T", "vel.x", "vel.y"];
+        if (cfg.dimensions == 3) { expected_names ~= ["pos.z", "vel.z"]; }
+        if (cfg.MHD) { expected_names ~= ["B.x", "B.y", "B.z"]; }
+        string[] speciesList;
+        if (n_species > 1) {
+            foreach (i; 0..n_species) { speciesList ~= "massf-" ~ gmodel.species_name(i); }
+        }
+        string[] TmodeList;
+        foreach (i; 0..n_modes) { TmodeList ~= "T-" ~ gmodel.energy_mode_name(to!int(i)); }
+        string[] turbList;
+        foreach (i; 0..n_turb) { turbList ~= "tq-" ~ cfg.turb_model.primitive_variable_name(i); }
+        //
         // Open filename and read all data points.
-        // Format will be sample point data as per the postprocessor.
         auto f = new File(fileName);
         auto range = f.byLine();
+        //
+        // First line is expected to name the columns with the correct variable names.
+        // Assume that it does, and proceed to identify the columns.
         auto line = range.front;
-        int npoints = 0;
-        while (!line.empty) {
-            string txt = to!string(line);
-            if (!canFind(txt, "#") && !canFind(txt, "pos.x")) {
-                // Assume that we have a line of data rather than variable names.
-                fstate ~= FlowState(GlobalConfig.gmodel_master, GlobalConfig.turb_model.nturb);
-                pos ~= Vector3();
-                number volume, Q_rad_org, f_rad_org, Q_rE_rad;
-                double dt_chem, dt_therm, dt_local;
-                scan_cell_data_from_fixed_order_string
-                    (txt, pos[$-1], volume, fstate[$-1],
-                     Q_rad_org, f_rad_org, Q_rE_rad,
-                     GlobalConfig.with_local_time_stepping,
-                     GlobalConfig.solverMode,
-                     dt_local, dt_chem, dt_therm,
-                     GlobalConfig.include_quality,
-                     GlobalConfig.MHD, GlobalConfig.divergence_cleaning,
-                     GlobalConfig.radiation,
-                     GlobalConfig.turb_model.nturb);
-                npoints += 1;
+        string txt = to!string(line);
+        txt = stripLeft(txt, "# ").stripRight();
+        string[] varnames = txt.split();
+        size_t[string] column_dict; foreach (i, varname; varnames) { column_dict[varname] = i; }
+        range.popFront();
+        foreach (name; expected_names) {
+            if (!canFind(varnames, name)) {
+                string msg = text("Did not find ", name, " in variables: ", varnames);
+                throw new LmrException(msg);
             }
+        }
+        // Start picking up the data lines.
+        line = range.front;
+        while (!line.empty) {
+            txt = to!string(line);
+            auto mypos = Vector3();
+            auto myfs = FlowState(gmodel, n_turb);
+            txt = stripLeft(txt).stripRight();
+            string[] items = txt.split();
+            mypos.x = to!number(items[column_dict["pos.x"]]);
+            mypos.y = to!number(items[column_dict["pos.y"]]);
+            mypos.z = (cfg.dimensions == 3) ? to!number(items[column_dict["pos.z"]]) : to!number(0.0);
+            myfs.gas.p = to!number(items[column_dict["p"]]);
+            myfs.gas.T = to!number(items[column_dict["T"]]);
+            foreach (i, name; TmodeList) {
+                myfs.gas.T_modes[i] = to!number(items[column_dict[name]]);
+            }
+            if (n_species > 1) {
+                foreach (i, name; speciesList) { myfs.gas.massf[i] = to!number(items[column_dict[name]]); }
+            } else {
+                myfs.gas.massf[0] = 1.0;
+            }
+            gmodel.update_thermo_from_pT(myfs.gas);
+            gmodel.update_sound_speed(myfs.gas);
+            gmodel.update_trans_coeffs(myfs.gas);
+            foreach (i; 0 .. n_species) { myfs.gas.rho_s[i] = myfs.gas.massf[i] * myfs.gas.rho; }
+            myfs.vel.x = to!number(items[column_dict["vel.x"]]);
+            myfs.vel.y = to!number(items[column_dict["vel.y"]]);
+            myfs.vel.z = (cfg.dimensions == 3) ? to!number(items[column_dict["vel.z"]]) : to!number(0.0);
+            foreach (i, name; turbList) { myfs.turb[i] = to!number(items[column_dict[name]]); }
+            if (cfg.MHD) {
+                myfs.B.x = to!number(items[column_dict["B.x"]]);
+                myfs.B.y = to!number(items[column_dict["B.y"]]);
+                myfs.B.z = to!number(items[column_dict["B.z"]]);
+            } else {
+                myfs.B.set(0.0, 0.0, 0.0);
+            }
+            fstate ~= myfs;
+            pos ~= mypos;
             range.popFront();
             line = range.front;
         } // end while
-        // writefln("FlowProfile: file=\"%s\", match=\"%s\", npoints=%d", fileName, match, npoints);
         //
         // The mapping of the nearest profile point to each ghost-cell or interface location
         // will be done as needed, at application time.
@@ -557,7 +617,7 @@ public:
     // not @nogc because of associative array lookup
     FlowState get_flowstate(size_t my_id, ref const(Vector3) my_pos)
     {
-        assert(fstate.length > 0, "FlowProfile is empty.");
+        assert(fstate.length > 0, "StaticFlowProfile is empty.");
         if (my_id in which_point) {
             return fstate[which_point[my_id]];
         } else {
@@ -607,7 +667,321 @@ public:
     {
         adjust_velocity(*fs, my_pos, omegaz);
     }
-} // end class FlowProfile
+} // end class StaticFlowProfile
+
+
+class TransientFlowProfile {
+    // For use in the classes that implement the InflowBC_TransientProfile boundary condition.
+    // GhostCellFlowStateCopyFromTransientProfile, BIE_FlowStateCopyFromTransientProfile
+    // There are non-obvious options for the match parameter in the constructor call.
+    // See the switch statement in the compute_distance() function for some hints.
+
+public:
+    string fileName;
+    string posMatch;
+    double[] times;
+    Vector3[] pos;
+    FlowState[][] fstate;
+
+    // Construct a TransientFlowProfile from a zip archive.
+    //
+    // The zip archive contains a JSON file with metadata, as specified below,
+    // and one data file for each time instant.
+    // As for the StaticFlowProfile, the format for each data file will be a header line
+    // followed by one sample point per line.
+    // The header line will specify the names of the columns and, at a minimum, be:
+    // pos.x pos.y p T vel.x vel.y
+    // These names should match the variable names retrieved from the metadata.json file
+    // and, although they are redundant, allow the direct use of files generated by
+    // the slicing operations of the postprocessing programs.
+    // The data lines will have numerical values for the corresponding quantities.
+    this (string fileName, string match)
+    {
+        this.fileName = fileName;
+        this.posMatch = match;
+        //
+        // Some context for the expected flow data.
+        alias cfg = GlobalConfig;
+        GasModel gmodel = cfg.gmodel_master;
+        size_t n_species = gmodel.n_species;
+        size_t n_modes = gmodel.n_modes;
+        size_t n_turb = cfg.turb_model.nturb;
+        //
+        string[] expected_names = ["pos.x", "pos.y", "p", "T", "vel.x", "vel.y"];
+        if (cfg.dimensions == 3) { expected_names ~= ["pos.z", "vel.z"]; }
+        if (cfg.MHD) { expected_names ~= ["B.x", "B.y", "B.z"]; }
+        string[] speciesList;
+        if (n_species > 1) {
+            foreach (i; 0..n_species) { speciesList ~= "massf-" ~ gmodel.species_name(i); }
+        }
+        string[] TmodeList;
+        foreach (i; 0..n_modes) { TmodeList ~= "T-" ~ gmodel.energy_mode_name(to!int(i)); }
+        string[] turbList;
+        foreach (i; 0..n_turb) { turbList ~= "tq-" ~ cfg.turb_model.primitive_variable_name(i); }
+        //
+        // Open zip archive and read the metadata and the profiles.
+        auto zip = new ZipArchive(read(fileName));
+        auto zipMembers = zip.directory;
+        foreach (name, member; zipMembers) { zip.expand(member); }
+        //
+        // The metadata comes as a JSON string that can be parsed for its values.
+        //
+        string metadataStr = assumeUTF(zipMembers["metadata.json"].expandedData);
+        JSONValue metadata = parseJSON(metadataStr);
+        //
+        int nspecies = getJSONint(metadata, "nspecies", 0);
+        if (nspecies != n_species) {
+            string msg = text("Expected nspecies:", n_species, " got:", nspecies);
+            throw new LmrException(msg);
+        }
+        int nmodes = getJSONint(metadata, "nmodes", 0);
+        if (nmodes != n_modes) {
+            string msg = text("Expected nmodes:", n_modes, " got:", nmodes);
+            throw new LmrException(msg);
+        }
+        int nvar = getJSONint(metadata, "nvar", 0);
+        string[] varnames; foreach (i; 0..nvar) { varnames ~= ""; }
+        varnames = getJSONstringarray(metadata, "varnames", varnames);
+        foreach (name; expected_names) {
+            if (!canFind(varnames, name)) {
+                string msg = text("Did not find ", name, " in variables: ", varnames);
+                throw new LmrException(msg);
+            }
+        }
+        size_t[string] column_dict; foreach (i, varname; varnames) { column_dict[varname] = i; }
+        //
+        ntimes = to!size_t(getJSONint(metadata, "ntimes", 0));
+        if (ntimes == 0) {
+            throw new LmrException("Expected at least one time instant in archive.");
+        }
+        foreach (k; 0..ntimes) { times ~= 0.0; }
+        times = getJSONdoublearray(metadata, "times", times);
+        //
+        int npoints = getJSONint(metadata, "npoints", 0);
+        if (npoints == 0) {
+            throw new LmrException("Expected at least one sample point in profile.");
+        }
+        // Now that we know how much data is coming,
+        // we can allocate suitable storage.
+        foreach (j; 0..npoints) { pos ~= Vector3(); }
+        fstate.length = ntimes;
+        foreach (k; 0..ntimes) {
+            foreach (j; 0..npoints) { fstate[k] ~= FlowState(gmodel, n_turb); }
+        }
+        //
+        foreach (k; 0..ntimes) {
+            string memberName = format("data.%d", k);
+            string contentStr = assumeUTF(zipMembers[memberName].expandedData);
+            // Format for each profile will be a header line followed by one sample point per line.
+            // The header line will specify the names of the columns and, at a minimum, be:
+            // pos.x pos.y p T vel.x vel.y
+            // The data lines will have numerical values for the corresponding quantities.
+            auto range = lineSplitter(contentStr);
+            // First line is expected to name the columns with the correct variable names.
+            // Just discard it..
+            auto line = range.front;
+            range.popFront();
+            // Pick up the data lines and scan them.
+            foreach (j; 0..npoints) {
+                string[] items = to!string(range.front).strip().split();
+                if (k == 0) {
+                    // We use the position data from the first time-instant only.
+                    Vector3* mypos = &pos[j];
+                    mypos.x = to!number(items[column_dict["pos.x"]]);
+                    mypos.y = to!number(items[column_dict["pos.y"]]);
+                    mypos.z = (cfg.dimensions == 3) ? to!number(items[column_dict["pos.z"]]) : to!number(0.0);
+                }
+                FlowState* myfs = &fstate[k][j];
+                myfs.gas.p = to!number(items[column_dict["p"]]);
+                myfs.gas.T = to!number(items[column_dict["T"]]);
+                foreach (i, name; TmodeList) {
+                    myfs.gas.T_modes[i] = to!number(items[column_dict[name]]);
+                }
+                if (n_species > 1) {
+                    foreach (i, name; speciesList) { myfs.gas.massf[i] = to!number(items[column_dict[name]]); }
+                } else {
+                    myfs.gas.massf[0] = 1.0;
+                }
+                gmodel.update_thermo_from_pT(myfs.gas);
+                gmodel.update_sound_speed(myfs.gas);
+                gmodel.update_trans_coeffs(myfs.gas);
+                foreach (i; 0 .. n_species) { myfs.gas.rho_s[i] = myfs.gas.massf[i] * myfs.gas.rho; }
+                myfs.vel.x = to!number(items[column_dict["vel.x"]]);
+                myfs.vel.y = to!number(items[column_dict["vel.y"]]);
+                myfs.vel.z = (cfg.dimensions == 3) ? to!number(items[column_dict["vel.z"]]) : to!number(0.0);
+                foreach (i, name; turbList) { myfs.turb[i] = to!number(items[column_dict[name]]); }
+                if (cfg.MHD) {
+                    myfs.B.x = to!number(items[column_dict["B.x"]]);
+                    myfs.B.y = to!number(items[column_dict["B.y"]]);
+                    myfs.B.z = to!number(items[column_dict["B.z"]]);
+                } else {
+                    myfs.B.set(0.0, 0.0, 0.0);
+                }
+                range.popFront();
+            } // end foreach j
+        } // end foreach k
+        //
+        // The mapping of the nearest profile point to each ghost-cell or interface location
+        // will be done as needed, at application time.
+        // This way, all of the necessary cell and position data should be valid.
+    } // end this()
+
+    @nogc
+    double compute_distance(ref const(Vector3) my_pos, ref const(Vector3) other_pos)
+    {
+        double distance, other_r, my_r, dx, dy, dz, dr;
+        switch (posMatch) {
+        case "xyz-to-xyz":
+            // 2D or 3D, closest match on all components of position.
+            // In 2D all z-components are supposed to be zero (and so, not matter).
+            dx = my_pos.x.re - other_pos.x.re;
+            dy = my_pos.y.re - other_pos.y.re;
+            dz = my_pos.z.re - other_pos.z.re;
+            distance = sqrt(dx*dx + dy*dy + dz*dz);
+            break;
+        case "xyA-to-xyA":
+            // 2D or 3D; don't care about z-component of position.
+            dx = my_pos.x.re - other_pos.x.re;
+            dy = my_pos.y.re - other_pos.y.re;
+            distance = sqrt(dx^^2 + dy^^2);
+            break;
+        case "AyA-to-AyA":
+            // 2D or 3D; only care about the y-component of position.
+            dy = my_pos.y.re - other_pos.y.re;
+            distance = fabs(dy);
+            break;
+        case "xy-to-xR":
+            // Starting with a profile from a 2D simulation, map it to
+            // a radial profile in a 3D simulation, considering the x-component
+            // of the position of the ghost cells when computing distance and
+            // picking the nearest point in the profile.
+            dx = my_pos.x.re - other_pos.x.re;
+            other_r = sqrt(other_pos.y.re^^2 + other_pos.z.re^^2);
+            my_r = sqrt(my_pos.y.re^^2 + my_pos.z.re^^2);
+            dr = my_r - other_r;
+            distance = sqrt(dx*dx + dr*dr);
+            break;
+        case "Ay-to-AR":
+            // Starting with a profile from a 2D simulation, map it to
+            // a radial profile in a 3D simulation, ignoring the x-component
+            // of the position of the ghost cells when computing distance and
+            // picking the nearest point in the profile.
+            other_r = sqrt(other_pos.y.re^^2 + other_pos.z.re^^2);
+            my_r = sqrt(my_pos.y.re^^2 + my_pos.z.re^^2);
+            dr = my_r - other_r;
+            distance = fabs(dr);
+            break;
+        case "2Daxi-to-3D-rotating":
+            // Map the y axis of a 2D simulation to the x-y plane of a 3D
+            // simulation, ignoring the other axes. (NNG, June 2024)
+            other_r = sqrt(other_pos.y.re^^2);
+            my_r = sqrt(my_pos.y.re^^2 + my_pos.x.re^^2);
+            dr = my_r - other_r;
+            distance = fabs(dr);
+            break;
+        default:
+            throw new FlowSolverException("Invalid match option.");
+        }
+        return distance;
+    } // end compute_distance()
+
+    @nogc
+    size_t find_nearest_profile_point(ref const(Vector3) my_pos)
+    {
+        size_t ip = 0; // Start looking here, assuming that there is at least one point.
+        double min_distance = compute_distance(my_pos, pos[0]);
+        foreach (i; 1 .. pos.length) {
+            double new_distance = compute_distance(my_pos, pos[i]);
+            if (new_distance < min_distance) { ip = i; min_distance = new_distance; }
+        }
+        return ip;
+    } // end find_nearest_profile_point()
+
+    @nogc
+    void set_time_interpolation(double t)
+    {
+        if (ntimes == 1) {
+            // Only one instance; much like a static profile.
+            it0 = 0;
+            it1 = 0;
+            w0 = 1.0;
+        } else {
+            // Search for the correct pair of instances.
+            it0 = ntimes - 2;
+            while (it0 > 0 && times[it0] > t) { it0 -= 1; }
+            it1 = it0 + 1;
+            // Clipped interpolation for the weight.
+            if (t < times[it0]) {
+                w0 = 1.0;
+            } else if (t > times[it1]) {
+                w0 = 0.0;
+            } else {
+                w0 = (times[it1] - t)/(times[it1] - times[it0]);
+            }
+        }
+        return;
+    } // end set_time_interpolation()
+
+    // not @nogc because of associative array lookup
+    void set_flowstate(FlowState* fs, size_t my_id, ref const(Vector3) my_pos)
+    {
+        assert(fstate.length > 0, "TransientFlowProfile is empty.");
+        size_t ip = (my_id in which_point) ? which_point[my_id] : find_nearest_profile_point(my_pos);
+        fs.copy_average_values_from(fstate[it0][ip], fstate[it1][ip], w0);
+        return;
+    } // end set_flowstate()
+
+    @nogc
+    void adjust_velocity(ref FlowState fs, ref const(Vector3) my_pos, double omegaz)
+    {
+        switch (posMatch) {
+        case "xyz-to-xyz": /* 3D, do nothing. */ break;
+        case "xyA-to-xyA": /* 3D, do nothing. */ break;
+        case "AyA-to-AyA": /* 3D, do nothing. */ break;
+        case "xy-to-xR": goto case "Ay-to-AR";
+        case "Ay-to-AR":
+            // We are assuming that the original 2D simulation had y>0.
+            double r = sqrt(my_pos.y.re^^2 + my_pos.z.re^^2);
+            double vel_yz = sqrt(fs.vel.y.re^^2 + fs.vel.z.re^^2);
+            double vely_sign = (fs.vel.y < 0.0) ? -1.0 : 1.0;
+            fs.vel.y = vely_sign * vel_yz * my_pos.y.re / r;
+            fs.vel.z = vely_sign * vel_yz * my_pos.z.re / r;
+            break;
+        case "2Daxi-to-3D-rotating":
+            double axi_vely = sqrt(fs.vel.y.re^^2);
+            double axi_velx = fs.vel.x.re;
+
+            double cyl_theta = atan2(my_pos.y.re, my_pos.x.re);
+            double cyl_vel_x = axi_vely*cos(cyl_theta);
+            double cyl_vel_y = axi_vely*sin(cyl_theta);
+            double cyl_vel_z = axi_velx;
+
+            fs.vel.x = cyl_vel_x;
+            fs.vel.y = cyl_vel_y;
+            fs.vel.z = cyl_vel_z;
+            if (omegaz != 0.0) { into_rotating_frame(fs.vel, my_pos, omegaz); }
+            break;
+        default:
+            throw new FlowSolverException("Invalid match option.");
+        }
+    }
+
+    @nogc
+    void adjust_velocity(FlowState* fs, ref const(Vector3) my_pos, double omegaz)
+    {
+        adjust_velocity(*fs, my_pos, omegaz);
+    }
+
+private:
+    size_t ntimes;
+    size_t it0 = 0;
+    size_t it1 = 0;
+    double w0 = 0.0;
+    size_t[size_t] which_point; // A place to memoize the mapped indices and we find them.
+    // Above, we search for the profile point nearest to the initial position.
+    // This position will only change for moving-grid simulations and we will not try
+    // to deal with that complication.
+} // end class TransientFlowProfile
 
 
 class FlowHistory {
@@ -618,97 +992,139 @@ public:
     string fileName;
     FlowState[] fstate;
     double[] times;
-    size_t nturb;
 
+    // Construct a FlowHistory object from a file with columns of data values.
+    //
+    // Format will be a header line followed by one sample time per line.
+    // The header line will specify the names of the columns and, at a minimum, be:
+    // time p T vel.x vel.y
+    // The data lines will have numerical values for the corresponding quantities.
     this (string fileName)
-    // Construct a FlowHistory object from a file of data values.
-    //
-    // The file may start with comment lines (that begin with #) and
-    // then have a line that gives the column names (with one called vel.x, at least).
-    //
-    // Each data line with have space-delimited values arranges in the following order.
-    // item: 0 1     2     3     4 5 6
-    // name: t vel.x vel.y vel.z p T massf[0]... T_modes[0]... turb[0]...
-    // For the array quantities, starting at item[6], there will be:
-    //   n_species>=1 mass-fraction values (there is at least one mass fraction)
-    //   n_modes>=0 T_modes values (there may be no extra energy modes)
-    //   nturb>=0 turbulence values (there may be no turbulence quantities)
     {
         this.fileName = fileName;
-        // Open filename and read all time and flow data.
-        auto gm = GlobalConfig.gmodel_master;
-        nturb = GlobalConfig.turb_model.nturb;
+        //
+        // Some context for the expected flow data.
+        alias cfg = GlobalConfig;
+        GasModel gmodel = cfg.gmodel_master;
+        size_t n_species = gmodel.n_species;
+        size_t n_modes = gmodel.n_modes;
+        size_t n_turb = cfg.turb_model.nturb;
+        //
+        string[] expected_names = ["time", "p", "T", "vel.x", "vel.y"];
+        if (cfg.MHD) { expected_names ~= ["B.x", "B.y", "B.z"]; }
+        string[] speciesList;
+        if (n_species > 1) {
+            foreach (i; 0..n_species) { speciesList ~= "massf-" ~ gmodel.species_name(i); }
+        }
+        string[] TmodeList;
+        foreach (i; 0..n_modes) { TmodeList ~= "T-" ~ gmodel.energy_mode_name(to!int(i)); }
+        string[] turbList;
+        foreach (i; 0..n_turb) { turbList ~= "tq-" ~ cfg.turb_model.primitive_variable_name(i); }
+        //
+        // Open filename and read it.
         auto f = new File(fileName);
         auto range = f.byLine();
+        //
+        // First line is expected to name the columns with the correct variable names.
+        // Assume that it does, and proceed to identify the columns.
         auto line = range.front;
-        while (!line.empty) {
-            string txt = to!string(line).chomp();
-            if (txt.length > 0 && !canFind(txt, "#") && !canFind(txt, "vel.x")) {
-                // Assume that we have a line of data values rather than variable names.
-                auto fs = FlowState(gm, nturb);
-                double tme;
-                auto items = txt.split();
-                if (items.length < 6+gm.n_species+gm.n_modes+nturb) {
-                    string msg = text("Did not find enough data on the line: \"", txt, "\"");
-                    throw new Error(msg);
-                }
-                tme = to!double(items[0]);
-                fs.vel.set(to!double(items[1]), to!double(items[2]), to!double(items[3]));
-                fs.gas.p = to!double(items[4]);
-                fs.gas.T = to!double(items[5]);
-                foreach (i; 0 .. gm.n_species) { fs.gas.massf[i] = to!double(items[6+i]); }
-                foreach (i; 0 .. gm.n_modes) { fs.gas.T_modes[i] = to!double(items[6+gm.n_species+i]); }
-                gm.update_thermo_from_pT(fs.gas);
-                foreach (i; 0 .. gm.n_species) { fs.gas.rho_s[i] = fs.gas.massf[i] * fs.gas.rho; }
-                version(turbulence) {
-                    foreach(i; 0 .. nturb) { fs.turb[i] = to!double(items[6+gm.n_species+gm.n_modes+i]); }
-                }
-                // Note that we do not have enough information for computing mu_t and k_t
-                // because we don't have local values of gradients that go into their calculation.
-                // See, for example, function turbulent_viscosity() in the turbulence.d module.
-                fs.mu_t = 0.0;
-                fs.k_t = 0.0;
-                //
-                times ~= tme;
-                fstate ~= fs;
+        string txt = to!string(line);
+        txt = stripLeft(txt, "# ").stripRight();
+        string[] varnames = txt.split();
+        size_t[string] column_dict; foreach (i, varname; varnames) { column_dict[varname] = i; }
+        range.popFront();
+        foreach (name; expected_names) {
+            if (!canFind(varnames, name)) {
+                string msg = text("FlowHistory: Did not find ", name, " in variables: ", varnames);
+                throw new LmrException(msg);
             }
+        }
+        // Start picking up the data lines.
+        line = range.front;
+        while (!line.empty) {
+            txt = to!string(line);
+            double tme;
+            auto myfs = FlowState(gmodel, n_turb);
+            txt = stripLeft(txt).stripRight();
+            string[] items = txt.split();
+            tme = to!double(items[column_dict["time"]]);
+            myfs.gas.p = to!number(items[column_dict["p"]]);
+            myfs.gas.T = to!number(items[column_dict["T"]]);
+            foreach (i, name; TmodeList) {
+                myfs.gas.T_modes[i] = to!number(items[column_dict[name]]);
+            }
+            if (n_species > 1) {
+                foreach (i, name; speciesList) { myfs.gas.massf[i] = to!number(items[column_dict[name]]); }
+            } else {
+                myfs.gas.massf[0] = 1.0;
+            }
+            gmodel.update_thermo_from_pT(myfs.gas);
+            gmodel.update_sound_speed(myfs.gas);
+            gmodel.update_trans_coeffs(myfs.gas);
+            foreach (i; 0 .. n_species) { myfs.gas.rho_s[i] = myfs.gas.massf[i] * myfs.gas.rho; }
+            myfs.vel.x = to!number(items[column_dict["vel.x"]]);
+            myfs.vel.y = to!number(items[column_dict["vel.y"]]);
+            myfs.vel.z = (cfg.dimensions == 3) ? to!number(items[column_dict["vel.z"]]) : to!number(0.0);
+            foreach (i, name; turbList) { myfs.turb[i] = to!number(items[column_dict[name]]); }
+            if (cfg.MHD) {
+                myfs.B.x = to!number(items[column_dict["B.x"]]);
+                myfs.B.y = to!number(items[column_dict["B.y"]]);
+                myfs.B.z = to!number(items[column_dict["B.z"]]);
+            } else {
+                myfs.B.set(0.0, 0.0, 0.0);
+            }
+            fstate ~= myfs;
+            times ~= tme;
             range.popFront();
             line = range.front;
         } // end while
+        //
         if (fstate.length < 2) {
-            throw new Error("FlowHistory is not properly initialized.");
+            throw new Error("FlowHistory did not have sufficient instances (minimum 2).");
         }
     } // end this()
 
     @nogc
-    void set_flowstate(ref FlowState fs, double t, GasModel gm)
+    void set_flowstate(ref FlowState fs, double t, LocalConfig cfg)
     {
+        GasModel gmodel = cfg.gmodel;
+        size_t n_species = gmodel.n_species;
+        size_t n_modes = gmodel.n_modes;
+        size_t n_turb = cfg.turb_model.nturb;
         // Find where we are in history and interpolate the flow state.
         size_t nt = times.length;
-        size_t i = 0;
-        while ((i < nt-1) && t > times[i+1]) { i++; }
-        i = min(i, nt-1);
-        if (i < nt-1 && t <= times[$-1]) {
-            // Linearly interpolate between states i, i+1
-            double frac = (t-times[i])/(times[i+1]-times[i]);
-            fs.vel.x = fstate[i].vel.x*(1.0-frac) + fstate[i+1].vel.x*frac;
-            fs.vel.y = fstate[i].vel.y*(1.0-frac) + fstate[i+1].vel.y*frac;
-            fs.vel.z = fstate[i].vel.z*(1.0-frac) + fstate[i+1].vel.z*frac;
-            fs.gas.p = fstate[i].gas.p*(1.0-frac) + fstate[i+1].gas.p*frac;
-            fs.gas.T = fstate[i].gas.T*(1.0-frac) + fstate[i+1].gas.T*frac;
-            foreach (j; 0 .. gm.n_species) {
-                fs.gas.massf[j] = fstate[i].gas.massf[j]*(1.0-frac) +
-                    fstate[i+1].gas.massf[j]*frac;
+        size_t k = 0;
+        while ((k < nt-1) && t > times[k+1]) { k++; }
+        k = min(k, nt-1);
+        if (k < nt-1 && t <= times[$-1]) {
+            // Linearly interpolate between states k, k+1
+            double frac1 = (t-times[k])/(times[k+1]-times[k]);
+            double frac0 = 1.0-frac1;
+            fs.vel.x = fstate[k].vel.x*frac0 + fstate[k+1].vel.x*frac1;
+            fs.vel.y = fstate[k].vel.y*frac0 + fstate[k+1].vel.y*frac1;
+            fs.vel.z = fstate[k].vel.z*frac0 + fstate[k+1].vel.z*frac1;
+            fs.gas.p = fstate[k].gas.p*frac0 + fstate[k+1].gas.p*frac1;
+            fs.gas.T = fstate[k].gas.T*frac0 + fstate[k+1].gas.T*frac1;
+            foreach (i; 0 .. n_species) {
+                fs.gas.massf[i] = fstate[k].gas.massf[i]*frac0 + fstate[k+1].gas.massf[i]*frac1;
             }
-            foreach (j; 0 .. gm.n_modes) {
-                fs.gas.T_modes[j] = fstate[i].gas.T_modes[j]*(1.0-frac) +
-                    fstate[i+1].gas.T_modes[j]*frac;
+            foreach (i; 0 .. n_modes) {
+                fs.gas.T_modes[i] = fstate[k].gas.T_modes[i]*frac0 + fstate[k+1].gas.T_modes[i]*frac1;
             }
-            gm.update_thermo_from_pT(fs.gas);
-            foreach (j; 0 .. gm.n_species) { fs.gas.rho_s[j] = fs.gas.massf[j] * fs.gas.rho; }
+            gmodel.update_thermo_from_pT(fs.gas);
+            gmodel.update_sound_speed(fs.gas);
+            gmodel.update_trans_coeffs(fs.gas);
+            foreach (i; 0 .. n_species) { fs.gas.rho_s[i] = fs.gas.massf[i] * fs.gas.rho; }
+            if (cfg.MHD) {
+                fs.B.x = fstate[k].B.x*frac0 + fstate[k+1].B.x*frac1;
+                fs.B.y = fstate[k].B.y*frac1 + fstate[k+1].B.y*frac1;
+                fs.B.z = fstate[k].B.z*frac0 + fstate[k+1].B.z*frac1;
+            } else {
+                fs.B.set(0.0, 0.0, 0.0);
+            }
             version(turbulence) {
-                foreach(j; 0 .. nturb) {
-                    fs.turb[j] = fstate[i].turb[j]*(1.0-frac) + fstate[i+1].turb[j]*frac;
+                foreach(i; 0 .. n_turb) {
+                    fs.turb[i] = fstate[k].turb[i]*frac0 + fstate[k+1].turb[i]*frac1;
                 }
             }
             fs.mu_t = 0.0;

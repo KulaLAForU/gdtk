@@ -63,6 +63,10 @@ import lmr.loads : writeLoadsToFile,
                    writeLoadsToFile,
                    count_written_loads,
                    update_loads_metadata_file;
+import lmr.grid_motion;
+import lmr.grid_motion_udf;
+import lmr.grid_motion_shock_fitting;
+import lmr.lmrwarnings;
 
 version(mpi_parallel) {
     import mpi;
@@ -169,6 +173,8 @@ struct NKGlobalConfig {
     bool useRealValuedFrechetDerivative = false;
     double frechetDerivativePerturbation = 1.0e-30;
     bool usePreconditioner = true;
+    bool useFGMRES = false;
+    int maxFgmresPreconditioningIterations = 10;
     double preconditionerPerturbation = 1.0e-30;
     PreconditionerType preconditioner = PreconditionerType.ilu;
     // ILU setting
@@ -223,6 +229,9 @@ struct NKGlobalConfig {
         useRealValuedFrechetDerivative = getJSONbool(jsonData, "use_real_valued_frechet_derivative", useRealValuedFrechetDerivative);
         frechetDerivativePerturbation = getJSONdouble(jsonData, "frechet_derivative_perturbation", frechetDerivativePerturbation);
         usePreconditioner = getJSONbool(jsonData, "use_preconditioner", usePreconditioner);
+        useFGMRES = getJSONbool(jsonData, "use_fgmres", useFGMRES);
+        maxFgmresPreconditioningIterations = getJSONint(jsonData, "max_fgmres_preconditioning_iterations",
+            maxFgmresPreconditioningIterations);
         preconditionerPerturbation = getJSONdouble(jsonData, "preconditioner_perturbation", preconditionerPerturbation);
         auto pString = getJSONstring(jsonData, "preconditioner", "NO_SELECTION_SUPPLIED");
         preconditioner = preconditionerTypeFromName(pString);
@@ -257,6 +266,7 @@ struct NKPhaseConfig {
     bool frozenLimiterForResidual = false;
     bool frozenLimiterForJacobian = false;
     double linearSolveTolerance = 0.01;
+    double fgmresPreconditionSolveTolerance = 1e-2;
     // Auto CFL control
     bool useAutoCFL = false;
     double thresholdRelativeResidualForCFLGrowth = 0.99;
@@ -265,6 +275,11 @@ struct NKPhaseConfig {
     double autoCFLExponent = 0.75;
     double limitOnCFLIncreaseRatio = 2.0;
     double limitOnCFLDecreaseRatio = 0.1;
+
+    // Shock fitting settings
+    bool gridMotionEnabled = false;
+    int shockFittingAllowInterpolation = true;
+    double shockFittingScaleFactor = 0.5;
 
     void readValuesFromJSON(JSONValue jsonData)
     {
@@ -280,6 +295,9 @@ struct NKPhaseConfig {
         frozenLimiterForResidual = getJSONbool(jsonData, "frozen_limiter_for_residual", frozenLimiterForResidual);
         frozenLimiterForJacobian = getJSONbool(jsonData, "frozen_limiter_for_jacobian", frozenLimiterForJacobian);
         linearSolveTolerance = getJSONdouble(jsonData, "linear_solve_tolerance", linearSolveTolerance);
+        fgmresPreconditionSolveTolerance = getJSONdouble(jsonData,
+                                                        "fgmres_preconditioning_solve_tolerance",
+                                                        fgmresPreconditionSolveTolerance);
         useAutoCFL = getJSONbool(jsonData, "use_auto_cfl", useAutoCFL);
         thresholdRelativeResidualForCFLGrowth = getJSONdouble(jsonData, "threshold_relative_residual_for_cfl_growth", thresholdRelativeResidualForCFLGrowth);
         startCFL = getJSONdouble(jsonData, "start_cfl", startCFL);
@@ -287,6 +305,10 @@ struct NKPhaseConfig {
         autoCFLExponent = getJSONdouble(jsonData, "auto_cfl_exponent", autoCFLExponent);
         limitOnCFLIncreaseRatio = getJSONdouble(jsonData, "limit_on_cfl_increase_ratio", limitOnCFLIncreaseRatio);
         limitOnCFLDecreaseRatio = getJSONdouble(jsonData, "limit_on_cfl_decrease_ratio", limitOnCFLDecreaseRatio);
+
+        gridMotionEnabled = getJSONbool(jsonData, "grid_motion_enabled", gridMotionEnabled);
+        shockFittingAllowInterpolation = getJSONbool(jsonData, "shock_fitting_allow_interpolation", true);
+        shockFittingScaleFactor = getJSONdouble(jsonData, "shock_fitting_scale_factor", shockFittingScaleFactor);
     }
 }
 
@@ -413,7 +435,8 @@ immutable double dummySimTime = -1.0;
 immutable double minScaleFactor = 1.0;
 immutable string refResidFname = "config/reference-residuals.saved";
 
-ConservedQuantities referenceResiduals, currentResiduals, rowScale, colScale;
+ConservedQuantities referenceResiduals, currentResiduals;
+ScaleFactors rowScale, colScale;
 double referenceGlobalResidual, globalResidual, prevGlobalResidual;
 bool residualsUpToDate = false;
 bool referenceResidualsAreSet = false;
@@ -430,6 +453,17 @@ Matrix!double H1;
 Matrix!double Gamma;
 Matrix!double Q0;
 Matrix!double Q1;
+
+// Module-local, global memory for the preconditioning iterations of fgmres
+double[] inner_g0;
+double[] inner_g1;
+double[] inner_h;
+double[] inner_hR;
+Matrix!double inner_H0;
+Matrix!double inner_H1;
+Matrix!double inner_Gamma;
+Matrix!double inner_Q0;
+Matrix!double inner_Q1;
 
 /*---------------------------------------------------------------------
  * Locally used data structures
@@ -589,6 +623,12 @@ void initNewtonKrylovSimulation(int snapshotStart, int maxCPUs, int threadsPerMP
     }
     cfg.n_flow_time_levels = 2;
 
+    // if we have grid motion, we need two grid time levels
+    if (cfg.grid_motion != GridMotion.none) {
+        cfg.n_grid_time_levels = 2;
+    }
+
+
     initLocalBlocks();
 
     /* RJG, 2024-03-05
@@ -623,6 +663,10 @@ void initNewtonKrylovSimulation(int snapshotStart, int maxCPUs, int threadsPerMP
          (cfg.unstructured_limiter == UnstructuredLimiter.hvenkat_mlp) ||
          (cfg.unstructured_limiter == UnstructuredLimiter.venkat_mlp))) {
         initUSGlimiters();
+    }
+
+    if (GlobalConfig.grid_motion == GlobalConfig.grid_motion.shock_fitting) {
+        initShockFitting();
     }
 
     orderBlocksBySize();
@@ -671,6 +715,15 @@ void readNewtonKrylovConfig()
         errMsg ~= "       We expect  (number of phases) - 1 entries in max_steps_in_initial_phases list.\n";
         errMsg ~= "       These entries are the maximum number of steps that will be taken in each initial phase,\n";
         errMsg ~= "       note that we do not need an entry for the terminal phase.\n";
+        throw new Error(errMsg);
+    }
+
+    // fgmrs and matrix based preconditioners are not compatible
+    if (cfg.is_master_task && nkCfg.useFGMRES && nkCfg.usePreconditioner) {
+        string errMsg;
+        errMsg ~= "\n";
+        errMsg ~= "ERROR: fgmres and matrix based preconditioning are not compatible\n";
+        errMsg ~= "To use FGMRES, make sure to set 'use_preconditioner = false'\n";
         throw new Error(errMsg);
     }
 
@@ -732,6 +785,28 @@ void readNewtonKrylovConfig()
             errMsg ~= "       frozen_limiter_for_jacobian cannot be false when frozen_limiter_for_residual is true.\n";
             throw new Error(errMsg);
         }
+
+        // Check for nonsensical grid motion settings
+        if (cfg.is_master_task && (cfg.grid_motion == GridMotion.none) && phase.gridMotionEnabled) {
+            string errMsg;
+            errMsg ~= "\n";
+            errMsg ~= format("ERROR: grid motion enabled in phase %d, but no globally selected grid motion", i+1);
+        }
+    }
+}
+
+class ScaleFactors {
+    ConservedQuantities fluidScaling;
+    number[] gridScaling;
+
+    this(size_t nConserved, int dim) {
+        fluidScaling = new ConservedQuantities(nConserved);
+        fluidScaling[] = to!number(1.0);
+
+        if (GlobalConfig.grid_motion != GridMotion.none) {
+            gridScaling.length = dim;
+            gridScaling[] = to!number(1.0);
+        }
     }
 }
 
@@ -765,8 +840,8 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
     size_t nConserved = cfg.cqi.n;
     referenceResiduals = new ConservedQuantities(nConserved);
     currentResiduals = new ConservedQuantities(nConserved);
-    rowScale = new ConservedQuantities(nConserved);
-    colScale = new ConservedQuantities(nConserved);
+    rowScale = new ScaleFactors(nConserved, cfg.dimensions);
+    colScale = new ScaleFactors(nConserved, cfg.dimensions);
     if (nkCfg.writeLoads && (nWrittenLoads == 0)) {
         if (cfg.is_master_task) {
             initLoadsFiles();
@@ -796,9 +871,19 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
             gradBlkIO = new GzipBlockIO(gradCIO);
         gradBlkIO.writeMetadataToFile(lmrCfg.gradientMetadataFile);
     }
+
     allocateGlobalGMRESWorkspace();
+    if (nkCfg.useFGMRES) { allocateGlobalFGMRESWorkspace(); }
+
     foreach (blk; localFluidBlocks) {
-        blk.allocate_GMRES_workspace(nkCfg.maxLinearSolverIterations, nkCfg.useRealValuedFrechetDerivative);
+        if (nkCfg.useFGMRES) {
+            blk.allocate_FGMRES_workspace(nkCfg.maxLinearSolverIterations,
+                                          nkCfg.maxFgmresPreconditioningIterations,
+                                          nkCfg.useRealValuedFrechetDerivative);
+        } else {
+            blk.allocate_GMRES_workspace(nkCfg.maxLinearSolverIterations,
+                                         nkCfg.useRealValuedFrechetDerivative);
+        }
     }
     /* solid blocks don't work just yet.
     allocate_global_solid_workspace();
@@ -1080,7 +1165,11 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
          *---
          */
         prevGlobalResidual = globalResidual;
-        solveNewtonStep(updatePreconditionerThisStep);
+        if (nkCfg.useFGMRES) {
+            solveNewtonStepFGMRES();
+        } else {
+            solveNewtonStep(updatePreconditionerThisStep);
+        }
 
 	/* 1a. perform a physicality check if required */
         omega = nkCfg.usePhysicalityCheck ? determineRelaxationFactor() : 1.0;
@@ -1322,6 +1411,20 @@ void allocateGlobalGMRESWorkspace()
     Q1 = new Matrix!double(m+1, m+1);
 }
 
+void allocateGlobalFGMRESWorkspace()
+{
+    size_t m = to!size_t(nkCfg.maxFgmresPreconditioningIterations);
+    inner_g0.length = m+1;
+    inner_g1.length = m+1;
+    inner_h.length = m+1;
+    inner_hR.length = m+1;
+    inner_H0 = new Matrix!double(m+1, m);
+    inner_H1 = new Matrix!double(m+1, m);
+    inner_Gamma = new Matrix!double(m+1, m+1);
+    inner_Q0 = new Matrix!double(m+1, m+1);
+    inner_Q1 = new Matrix!double(m+1, m+1);
+}
+
 /*---------------------------------------------------------------------
  * Auxiliary functions related to iteration algorithm
  *---------------------------------------------------------------------
@@ -1350,6 +1453,15 @@ void setPhaseSettings(size_t phase)
     }
     if (activePhase.frozenShockDetector) {
         cfg.frozen_shock_detector = true;
+    }
+    if (cfg.grid_motion == GridMotion.shock_fitting) {
+        cfg.shock_fitting_allow_flow_reconstruction = (
+            (activePhase.residualInterpolationOrder == 2) && 
+            activePhase.shockFittingAllowInterpolation);
+
+        foreach (blk; parallel(localFluidBlocks, 1)) {
+            blk.myConfig.shock_fitting_scale_factor = activePhase.shockFittingScaleFactor;
+        }
     }
 }
 
@@ -1570,7 +1682,7 @@ void solveNewtonStep(bool updatePreconditionerThisStep)
 
     if (nkCfg.useResidualSmoothing) {
         evalResidualSmoothing();
-	applyResidualSmoothing();
+    	applyResidualSmoothing();
     }
 
     setInitialGuess();
@@ -1608,7 +1720,7 @@ void solveNewtonStep(bool updatePreconditionerThisStep)
 
         // scale the r0 vector
         foreach (blk; parallel(localFluidBlocks,1)) {
-            scaleVector(rowScale, blk.r0, nConserved);
+            scaleVector(rowScale, blk.r0, nConserved, blk.cells.length*nConserved);
         }
 
         // beta = ||r0||
@@ -1633,8 +1745,8 @@ void solveNewtonStep(bool updatePreconditionerThisStep)
             writeln(" calling performIterations.");
         }
         */
-
-        isConverged = performIterations(maxIterations, targetResidual, rowScale, colScale, iterationCount, linearSolveResidual);
+        isConverged = performIterations(maxIterations, targetResidual, rowScale,
+                                        colScale, iterationCount, linearSolveResidual);
         int m = iterationCount;
 
         /*
@@ -1658,7 +1770,7 @@ void solveNewtonStep(bool updatePreconditionerThisStep)
 
         // We first multiply zed by the column scaling to recover zed *= Dc = P * dU
         foreach (blk; parallel(localFluidBlocks,1)) {
-            scaleVector(colScale, blk.zed, nConserved);
+            scaleVector(colScale, blk.zed, nConserved, blk.cells.length*nConserved);
         }
 
         // Next we remove preconditioner effect to finally recover dU
@@ -1704,6 +1816,138 @@ void solveNewtonStep(bool updatePreconditionerThisStep)
     gmresInfo.iterationCount = iterationCount;
 }
 
+
+void solveNewtonStepFGMRES()
+{
+    /*
+    debug {
+        writeln("DEBUG: solveNewtonStep()");
+        writeln(" entered function.");
+    }
+    */
+
+    double linearSolveResidual;
+    alias cfg = GlobalConfig;
+    size_t nConserved = cfg.cqi.n;
+
+    bool isConverged = false;
+    /*---
+     * 0. Preparation for iterations.
+     *---
+     */
+
+    evalResidual(0);
+
+    setResiduals();
+
+    if (nkCfg.useRealValuedFrechetDerivative) { setR0(); }
+
+    computeGlobalResidual();
+
+    determineScaleFactors(rowScale, colScale, nkCfg.useScaling);
+
+    if (nkCfg.useResidualSmoothing) {
+        evalResidualSmoothing();
+    	applyResidualSmoothing();
+    }
+
+    setInitialGuess();
+
+    /*---
+     * 1. Outer loop of restarted GMRES
+     *---
+     */
+
+    size_t r_break;
+    int maxIterations = nkCfg.maxLinearSolverIterations;
+    // We add one here because input is to do with number of *restarts*.
+    // We need at least one attempt (+1) plus the number of restarts chosen.
+    int nAttempts = nkCfg.maxLinearSolverRestarts + 1;
+    int iterationCount;
+
+    /*
+    debug {
+        writeln("DEBUG: solveNewtonStep()");
+        writeln(" starting restarted GMRES iterations.");
+    }
+    */
+
+    double beta, beta0, targetResidual;
+    foreach (r; 0 .. nAttempts) {
+        // Initialise some working arrays and matrices for this step.
+        g0[] = 0.0;
+        g1[] = 0.0;
+        H0.zeros();
+        H1.zeros();
+        Gamma.eye();
+
+        // r0 = b - A*x0
+        compute_r0();
+
+        // scale the r0 vector
+        foreach (blk; parallel(localFluidBlocks,1)) {
+            scaleVector(rowScale, blk.r0, nConserved, blk.cells.length*nConserved);
+        }
+
+        // beta = ||r0||
+        beta = computeLinearSystemResidual();
+
+        // Set first residual entry.
+        g0[0] = beta;
+
+        // v = r0/beta
+        prepareKrylovSpace(beta);
+
+        // Compute target residual on first restart
+        if (r == 0) {
+            targetResidual = activePhase.linearSolveTolerance * beta;
+            beta0 = beta; // store a copy of the initial residual for the diagnostics output
+        }
+
+        // Delegate inner iterations
+        isConverged = performFGMRESIterations(maxIterations,
+                                              nkCfg.maxFgmresPreconditioningIterations,
+                                              targetResidual,
+                                              activePhase.fgmresPreconditionSolveTolerance,
+                                              rowScale, colScale,
+                                              iterationCount, linearSolveResidual);
+        int m = iterationCount;
+
+        // At end H := R up to row m
+        //        g := gm up to row m
+        upperSolve!double(H1, to!int(m), g1);
+        // In serial, distribute a copy of g1 to each block
+        foreach (blk; localFluidBlocks) blk.g1[] = g1[];
+        foreach (blk; parallel(localFluidBlocks,1)) {
+            nm.bbla.transpose_and_dot!double(blk.ZT, blk.nvars, m, blk.nvars, blk.g1, blk.zed);
+        }
+
+        foreach(blk; parallel(localFluidBlocks,1)) {
+            foreach (k; 0 .. blk.nvars) blk.dU[k] = blk.x0[k] + blk.zed[k];
+        }
+
+        if (isConverged || (r == nkCfg.maxLinearSolverRestarts)) {
+            // We are either converged, or
+            // we've run out of restart attempts.
+            // In either case, we can leave now.
+            r_break = r;
+            break;
+        }
+
+        // If we get here, we need to prepare for next restart by setting
+        // the initial guess to the current estimate of the solution
+        foreach (blk; parallel(localFluidBlocks, 1)) {
+            blk.x0[] = blk.dU[];
+        }
+    }
+
+    // Set some information before leaving. This might be used in diagnostics file.
+    gmresInfo.nRestarts = to!int(r_break);
+    gmresInfo.initResidual = beta0.re;
+    gmresInfo.finalResidual = linearSolveResidual.re;
+    gmresInfo.iterationCount = iterationCount;
+}
+
 /**
  * Copy values from dUdt into R.
  *
@@ -1720,6 +1964,20 @@ void setResiduals()
                 blk.R[startIdx+ivar] = cell.dUdt[0][ivar].re;
             }
             startIdx += nConserved;
+        }
+
+        if (GlobalConfig.grid_motion) {
+            foreach (i, vtx; blk.vertices) {
+                if (!vtx.solve_position) continue;
+                blk.R[startIdx] = vtx.vel[0].x.re;
+                startIdx++;
+                blk.R[startIdx] = vtx.vel[0].y.re;
+                startIdx++;
+                if (GlobalConfig.dimensions == 3) {
+                    blk.R[startIdx] = vtx.vel[0].z.re;
+                    startIdx++;
+                }
+            }
         }
     }
 }
@@ -1752,6 +2010,19 @@ void setR0()
                 }
                 startIdx += nConserved;
             }
+            if (GlobalConfig.grid_motion != GridMotion.none) {
+                foreach (vtx; blk.vertices) {
+                    if (!vtx.solve_position) continue;
+                    blk.R0[startIdx] = vtx.pos[1].x.re;
+                    startIdx++;
+                    blk.R0[startIdx] = vtx.pos[1].y.re;
+                    startIdx++;
+                    if (GlobalConfig.dimensions == 3) {
+                        blk.R0[startIdx] = vtx.pos[1].z.re;
+                        startIdx++;
+                    }
+                }
+            }
         }
     } else {
         // If we aren't performing a defect-correction update, then just set R0 to the already evaluated R vector.
@@ -1779,16 +2050,20 @@ void setR0()
  * Authors: RJG and KAD
  * Date: 2022-03-02
  */
-void determineScaleFactors(ref ConservedQuantities rowScale, ref ConservedQuantities colScale, bool useScaling)
+void determineScaleFactors(ref ScaleFactors rowScale, ref ScaleFactors colScale, bool useScaling)
 {
     if (!useScaling) {
-        rowScale[] = to!number(1.0);
-        colScale[] = to!number(1.0);
         return;
     }
     // else we go ahead and determine the scale factors
-    rowScale[] = to!number(0.0);
-    colScale[] = to!number(0.0);
+    rowScale.fluidScaling[] = to!number(0.0);
+    colScale.fluidScaling[] = to!number(0.0);
+    if (GlobalConfig.grid_motion != GridMotion.none) {
+
+        rowScale.gridScaling[] = to!number(0.0);
+        colScale.gridScaling[] = to!number(0.0);
+    }
+
     // First do this for each block.
     size_t nConserved = GlobalConfig.cqi.n;
     foreach (blk; parallel(localFluidBlocks,1)) {
@@ -1798,28 +2073,67 @@ void determineScaleFactors(ref ConservedQuantities rowScale, ref ConservedQuanti
                 blk.maxRate[ivar] = fmax(blk.maxRate[ivar], fabs(cell.dUdt[0][ivar]));
             }
         }
+
+        if (GlobalConfig.grid_motion != GridMotion.none) {
+            foreach (i, vtx; blk.vertices) {
+                blk.maxVel[0] = fmax(blk.maxVel[0], fabs(vtx.vel[0].x));
+                blk.maxVel[1] = fmax(blk.maxVel[1], fabs(vtx.vel[0].y));
+                if (GlobalConfig.dimensions == 3) {
+                    blk.maxVel[2] = fmax(blk.maxVel[2], fabs(vtx.vel[0].z));
+                }
+            }
+        }
     }
+
     // Next, reduce that maxR information across all blocks and processes
     foreach (blk; localFluidBlocks) {
         foreach (ivar; 0 .. nConserved) {
-            colScale[ivar] = fmax(colScale[ivar], blk.maxRate[ivar]);
+            colScale.fluidScaling[ivar] = fmax(colScale.fluidScaling[ivar], blk.maxRate[ivar]);
+        }
+
+        if (GlobalConfig.grid_motion != GridMotion.none) {
+            colScale.gridScaling[0] = fmax(colScale.gridScaling[0], blk.maxVel[0]);
+            colScale.gridScaling[1] = fmax(colScale.gridScaling[1], blk.maxVel[1]);
+            if (GlobalConfig.dimensions == 3) {
+                colScale.gridScaling[2] = fmax(colScale.gridScaling[2], blk.maxVel[2]);
+            }
         }
     }
+
     // In distributed memory, reduce max values and make sure everyone has a copy.
     version(mpi_parallel) {
         foreach (ivar; 0 .. nConserved) {
-            MPI_Allreduce(MPI_IN_PLACE, &(colScale[ivar].re), 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+            MPI_Allreduce(MPI_IN_PLACE, &(colScale.fluidScaling[ivar].re), 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        }
+        
+        if (GlobalConfig.grid_motion != GridMotion.none) {
+            foreach (idim; 0 .. GlobalConfig.dimensions) {
+                MPI_Allreduce(MPI_IN_PLACE, &(colScale.gridScaling[idim].re), 1, MPI_DOUBLE,
+                              MPI_MAX, MPI_COMM_WORLD);
+            }
         }
     }
 
     // Use a guard on scale values if they get small
     foreach (ivar; 0 .. nConserved) {
-        colScale[ivar] = fmax(colScale[ivar], minScaleFactor);
+        colScale.fluidScaling[ivar] = fmax(colScale.fluidScaling[ivar], minScaleFactor);
+
+    }
+    if (GlobalConfig.grid_motion != GridMotion.none) {
+        foreach (idim; 0 .. GlobalConfig.dimensions) {
+            colScale.gridScaling[idim] = fmax(colScale.gridScaling[idim], minScaleFactor);
+        }
     }
 
     // The row scaling is the reciprocal of the column scaling
     foreach (ivar; 0 .. nConserved) {
-        rowScale[ivar] = 1./colScale[ivar];
+        rowScale.fluidScaling[ivar] = 1./colScale.fluidScaling[ivar];
+
+    }
+    if (GlobalConfig.grid_motion != GridMotion.none) {
+        foreach (idim; 0 .. GlobalConfig.dimensions) {
+            rowScale.gridScaling[idim] = 1. / colScale.gridScaling[idim];
+        }
     }
 
 }
@@ -1859,6 +2173,21 @@ void setInitialGuess()
 }
 
 /**
+ * Set initial inner guess vector for fGMRES, currently we set this to 0 (as is common)
+ *
+ * x0 = [0]
+ *
+ * Authors: RGW, KAD and RJG
+ * Date: 2022-03-02
+ */
+void setInitialInnerGuess()
+{
+    foreach (blk; parallel(localFluidBlocks,1)) {
+        blk.inner_x0[] = 0.0;
+    }
+}
+
+/**
  * Compute the initial residual vector for GMRES method for any arbitrary x0,
  *
  * r0 = b - A*x0
@@ -1885,6 +2214,36 @@ void compute_r0()
     // set r0 := R - A*zed
     foreach (blk; parallel(localFluidBlocks,1)) {
         foreach (k; 0 .. blk.nvars) blk.r0[k] = blk.R[k] - blk.w[k];
+    }
+}
+
+/**
+ * Compute the initial residual vector for the inner fGMRES method for any arbitrary x0,
+ *
+ * r0 = b - A*x0
+ *
+ * where b is the residual vector R, and A is the augmented Jacobian (I/dt - J).
+ *
+ * Note that this routine expects the x0 vector to be set prior to calling.
+ *
+ * Authors: RGW, KAD and RJG
+ * Date: 2024-02-27
+ */
+void compute_inner_r0()
+{
+    size_t nConserved = GlobalConfig.cqi.n;
+
+    // place x0 in zed
+    foreach (blk; parallel(localFluidBlocks,1)) {
+        blk.zed[] = blk.inner_x0[];
+    }
+
+    // evaluate A*zed
+    evalAugmentedJacobianVectorProduct(true);
+
+    // set r0 := R - A*zed
+    foreach (blk; parallel(localFluidBlocks,1)) {
+        foreach (k; 0 .. blk.nvars) blk.r0[k] = blk.v[k] - blk.w[k];
     }
 }
 
@@ -1918,6 +2277,24 @@ void prepareKrylovSpace(double beta)
         blk.v[] = (1./beta)*blk.r0[];
         foreach (k; 0 .. blk.nvars) {
             blk.VT[k] = blk.v[k];
+        }
+    }
+}
+
+
+/**
+ * Prepare the Krylov space for iterating.
+ *
+ * Authors: RGW, RJG and KAD
+ * Date: 2024-12-13
+ */
+void prepareInnerKrylovSpace(double beta)
+{
+    inner_g0[0] = beta;
+    foreach (blk; parallel(localFluidBlocks,1)) {
+        blk.v[] = (1./beta)*blk.r0[];
+        foreach (k; 0 .. blk.nvars) {
+            blk.VT_inner[k] = blk.v[k];
         }
     }
 }
@@ -1961,11 +2338,20 @@ void computePreconditioner()
  * Date: 2023-03-13
  */
 
-void scaleVector(ConservedQuantities scale, ref double[] vec, size_t nConserved)
+void scaleVector(ScaleFactors scale, ref double[] vec, size_t nConserved,
+                 size_t nFluidVars)
 {
-    foreach (k, ref v; vec) {
+    foreach (k; 0 .. nFluidVars) {
         size_t ivar = k % nConserved;
-        v *= scale[ivar].re;
+        vec[k] *= scale.fluidScaling[ivar].re;
+    }
+
+    if (GlobalConfig.grid_motion != GridMotion.none) {
+        int dim = GlobalConfig.dimensions;
+        foreach (k; nFluidVars .. vec.length) {
+            size_t ivar = k % dim;
+            vec[k] *= scale.gridScaling[ivar].re;
+        }
     }
 }
 
@@ -2030,7 +2416,7 @@ void applyResidualSmoothing()
  * Date: 2022-03-02
  */
 bool performIterations(int maxIterations, double targetResidual,
-                       ref ConservedQuantities rowScale, ref ConservedQuantities colScale,
+                       ref ScaleFactors rowScale, ref ScaleFactors colScale,
                        ref int iterationCount,
                        ref double resid)
 {
@@ -2053,7 +2439,6 @@ bool performIterations(int maxIterations, double targetResidual,
         writeln(" starting Krylov iterations.");
     }
     */
-
     foreach (j; 0 .. maxIterations) {
         iterationCount = j+1;
 
@@ -2067,7 +2452,7 @@ bool performIterations(int maxIterations, double targetResidual,
 
         // 1. apply column scaling to v
         foreach (blk; parallel(localFluidBlocks,1)) {
-            scaleVector(colScale, blk.v, nConserved);
+            scaleVector(colScale, blk.v, nConserved, nConserved*blk.cells.length);
         }
 
         /*
@@ -2099,7 +2484,7 @@ bool performIterations(int maxIterations, double targetResidual,
 
         // apply row scaling to w
         foreach (blk; parallel(localFluidBlocks,1)) {
-            scaleVector(rowScale, blk.w, nConserved);
+            scaleVector(rowScale, blk.w, nConserved, blk.cells.length*nConserved);
         }
 
         /*
@@ -2195,6 +2580,265 @@ bool performIterations(int maxIterations, double targetResidual,
     return isConverged;
 }
 
+/**
+ * Perform fGMRES iterations to fill Krylov subspace and get solution estimate.
+ *
+ * Returns boolean indicating converged or not.
+ *
+ * Authors: RGW, RJG and KAD
+ * Date: 2024-12-13
+ */
+bool performFGMRESIterations(int maxIterations, int maxPreconditioningIterations,
+                             double targetResidual,
+                             double targetPreconditionResidual,
+                             ref ScaleFactors rowScale,
+                             ref ScaleFactors colScale,
+                             ref int iterationCount,
+                             ref double resid)
+{
+    alias cfg = GlobalConfig;
+
+    bool isConverged = false;
+    size_t nConserved = cfg.cqi.n;
+
+    foreach (j; 0 .. maxIterations) {
+        iterationCount = j+1;
+
+        // 1. apply column scaling to v
+        foreach (blk; parallel(localFluidBlocks,1)) {
+            scaleVector(colScale, blk.v, nConserved, blk.cells.length*nConserved);
+        }
+
+        // 2. Preconditioning
+        // 2a. Perform inner gmres to solve the preconditioning system
+        bool inner_converged = inner_gmres(maxPreconditioningIterations,
+                                           targetPreconditionResidual);
+        // 2b. Save the preconditioned Krylov vector
+        foreach (blk; parallel(localFluidBlocks, 1)) {
+            size_t offset = j * blk.nvars;
+            foreach (k; 0 .. blk.nvars) {
+                blk.ZT[offset + k] = blk.zed[k];
+            }
+        }
+
+        // 3. Jacobian-vector product
+        evalAugmentedJacobianVectorProduct();
+
+        // apply row scaling to w
+        foreach (blk; parallel(localFluidBlocks,1)) {
+            scaleVector(rowScale, blk.w, nConserved, blk.cells.length*nConserved);
+        }
+
+        // 4. The remainder of the algorithm looks a lot like any standard
+        // GMRES implementation (for example, see smla.d)
+        foreach (i; 0 .. j+1) {
+            foreach (blk; parallel(localFluidBlocks,1)) {
+                // Extract column 'i'
+                size_t offset = i*blk.nvars;
+                foreach (k; 0 .. blk.nvars ) blk.v[k] = blk.VT[offset + k];
+            }
+            double H0_ij;
+            mixin(dotOverBlocks("H0_ij", "w", "v"));
+            version(mpi_parallel) {
+                MPI_Allreduce(MPI_IN_PLACE, &(H0_ij.re), 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            }
+            H0[i,j] = H0_ij;
+            foreach (blk; parallel(localFluidBlocks,1)) {
+                foreach (k; 0 .. blk.nvars) blk.w[k] -= H0_ij*blk.v[k];
+            }
+        }
+        double H0_jp1j;
+        mixin(dotOverBlocks("H0_jp1j", "w", "w"));
+        version(mpi_parallel) {
+            MPI_Allreduce(MPI_IN_PLACE, &(H0_jp1j.re), 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        }
+        H0_jp1j = sqrt(H0_jp1j);
+        H0[j+1,j] = H0_jp1j;
+
+        foreach (blk; parallel(localFluidBlocks,1)) {
+            size_t offset = (j+1)*blk.nvars;
+            foreach (k; 0 .. blk.nvars) {
+                blk.v[k] = blk.w[k]/H0_jp1j;
+                blk.VT[offset + k] = blk.v[k];
+            }
+        }
+
+        // Build rotated Hessenberg progressively
+        if (j != 0) {
+            // Extract final column in H
+            foreach (i; 0 .. j+1) h[i] = H0[i,j];
+            // Rotate column by previous rotations (stored in Q0)
+            nm.bbla.dot(Q0, j+1, j+1, h, hR);
+            // Place column back in H
+            foreach (i; 0 .. j+1) H0[i,j] = hR[i];
+        }
+        // Now form new Gamma
+        Gamma.eye();
+        auto denom = sqrt(H0[j,j]*H0[j,j] + H0[j+1,j]*H0[j+1,j]);
+        auto s_j = H0[j+1,j]/denom;
+        auto c_j = H0[j,j]/denom;
+        Gamma[j,j] = c_j; Gamma[j,j+1] = s_j;
+        Gamma[j+1,j] = -s_j; Gamma[j+1,j+1] = c_j;
+        // Apply rotations
+        nm.bbla.dot(Gamma, j+2, j+2, H0, j+1, H1);
+        nm.bbla.dot(Gamma, j+2, j+2, g0, g1);
+        // Accumulate Gamma rotations in Q.
+        if (j == 0) {
+            nm.bbla.copy(Gamma, Q1);
+        }
+        else {
+            nm.bbla.dot!double(Gamma, j+2, j+2, Q0, j+2, Q1);
+        }
+
+        // Prepare for next step
+        nm.bbla.copy(H1, H0);
+        g0[] = g1[];
+        nm.bbla.copy(Q1, Q0);
+
+        // Get residual
+        resid = fabs(g1[j+1]);
+        if (resid <= targetResidual) {
+            isConverged = true;
+            break;
+        }
+    }
+
+    return isConverged;
+}
+
+/**
+ * Perform inner fGMRES iterations.
+ *
+ * Returns boolean indicating converged or not.
+ *
+ * Authors: RGW, RJG and KAD
+ * Date: 2024-12-13
+ */
+bool inner_gmres(int maxIterations, double targetResidual)
+{
+    alias cfg = GlobalConfig;
+    size_t nConserved = cfg.cqi.n;
+    bool isConverged = false;
+
+    inner_g0[] = 0.0;
+    inner_g1[] = 0.0;
+    inner_H0.zeros();
+    inner_H1.zeros();
+    inner_Gamma.eye();
+
+    setInitialInnerGuess();
+    compute_inner_r0();
+    double beta = computeLinearSystemResidual();
+    prepareInnerKrylovSpace(beta);
+    int iterationCount = 0;
+
+    foreach (j; 0 .. maxIterations) {
+        iterationCount = j+1;
+
+        // no preconditioning here, so just copy v to zed
+        foreach (blk; parallel(localFluidBlocks, 1)) {
+            blk.zed[] = blk.v[];
+        }
+
+        // 2. Jacobian-vector product
+        evalAugmentedJacobianVectorProduct(true);
+
+        // 4. The remainder of the algorithm looks a lot like any standard
+        // GMRES implementation (for example, see smla.d)
+        foreach (i; 0 .. j+1) {
+            foreach (blk; parallel(localFluidBlocks,1)) {
+                // Extract column 'i'
+                size_t offset = i*blk.nvars;
+                foreach (k; 0 .. blk.nvars ) blk.v[k] = blk.VT_inner[offset + k];
+            }
+            double H0_ij;
+            mixin(dotOverBlocks("H0_ij", "w", "v"));
+            version(mpi_parallel) {
+                MPI_Allreduce(MPI_IN_PLACE, &(H0_ij.re), 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            }
+            inner_H0[i,j] = H0_ij;
+            foreach (blk; parallel(localFluidBlocks,1)) {
+                foreach (k; 0 .. blk.nvars) blk.w[k] -= H0_ij*blk.v[k];
+            }
+        }
+        double H0_jp1j;
+        mixin(dotOverBlocks("H0_jp1j", "w", "w"));
+        version(mpi_parallel) {
+            MPI_Allreduce(MPI_IN_PLACE, &(H0_jp1j.re), 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        }
+        H0_jp1j = sqrt(H0_jp1j);
+        inner_H0[j+1,j] = H0_jp1j;
+
+        foreach (blk; parallel(localFluidBlocks,1)) {
+            size_t offset = (j+1)*blk.nvars;
+            foreach (k; 0 .. blk.nvars) {
+                blk.v[k] = blk.w[k]/H0_jp1j;
+                blk.VT_inner[offset + k] = blk.v[k];
+            }
+        }
+
+        // Build rotated Hessenberg progressively
+        if (j != 0) {
+            // Extract final column in H
+            foreach (i; 0 .. j+1) inner_h[i] = inner_H0[i,j];
+            // Rotate column by previous rotations (stored in Q0)
+            nm.bbla.dot(inner_Q0, j+1, j+1, inner_h, inner_hR);
+            // Place column back in H
+            foreach (i; 0 .. j+1) inner_H0[i,j] = inner_hR[i];
+        }
+
+        // Now form new Gamma
+        inner_Gamma.eye();
+        auto denom = sqrt(inner_H0[j,j]*inner_H0[j,j] + inner_H0[j+1,j]*inner_H0[j+1,j]);
+        auto s_j = inner_H0[j+1,j]/denom;
+        auto c_j = inner_H0[j,j]/denom;
+        inner_Gamma[j,j] = c_j; inner_Gamma[j,j+1] = s_j;
+        inner_Gamma[j+1,j] = -s_j; inner_Gamma[j+1,j+1] = c_j;
+        // Apply rotations
+        nm.bbla.dot(inner_Gamma, j+2, j+2, inner_H0, j+1, inner_H1);
+        nm.bbla.dot(inner_Gamma, j+2, j+2, inner_g0, inner_g1);
+
+        // Accumulate Gamma rotations in Q.
+        if (j == 0) {
+            nm.bbla.copy(inner_Gamma, inner_Q1);
+        }
+        else {
+            nm.bbla.dot!double(inner_Gamma, j+2, j+2, inner_Q0, j+2, inner_Q1);
+        }
+
+        // Prepare for next step
+        nm.bbla.copy(inner_H1, inner_H0);
+        inner_g0[] = inner_g1[];
+        nm.bbla.copy(inner_Q1, inner_Q0);
+
+        // Get residual
+        double resid = fabs(g1[j+1]);
+        if (resid <= targetResidual) {
+            isConverged = true;
+            break;
+        }
+    }
+
+    int m = iterationCount;
+
+    // At end H := R up to row m
+    //        g := gm up to row m
+    upperSolve!double(inner_H1, to!int(m), inner_g1);
+
+    // In serial, distribute a copy of g1 to each block
+    foreach (blk; localFluidBlocks) blk.inner_g1[] = inner_g1[];
+    foreach (blk; parallel(localFluidBlocks,1)) {
+        nm.bbla.transpose_and_dot!double(blk.VT_inner, blk.nvars, m, blk.nvars,
+                                         blk.inner_g1, blk.zed);
+    }
+
+    foreach (blk; parallel(localFluidBlocks, 1)) {
+        foreach (k; 0 .. blk.nvars) blk.zed[k] += blk.inner_x0[k];
+    }
+
+    return isConverged;
+}
+
 
 /**
  * Apply preconditioning to GMRES iterations.
@@ -2222,7 +2866,7 @@ void applyPreconditioning()
     case PreconditionerType.ilu:
         foreach (blk; parallel(localFluidBlocks,1)) {
             blk.zed[] = blk.v[];
-            nm.smla.solve(blk.flowJacobian.local, blk.zed);
+            nm.smla.solve(blk.flowJacobian.local, blk.zed[0 .. nConserved * blk.cells.length]);
         }
         break;
     } // end switch
@@ -2259,7 +2903,7 @@ void removePreconditioning()
     case PreconditionerType.ilu:
         foreach(blk; parallel(localFluidBlocks,1)) {
             blk.dU[] = blk.zed[];
-            nm.smla.solve(blk.flowJacobian.local, blk.dU);
+            nm.smla.solve(blk.flowJacobian.local, blk.dU[0 .. nConserved * blk.cells.length]);
         }
         break;
     } // end switch
@@ -2333,7 +2977,7 @@ double computePerturbationSize()
  * Authors: KAD and RJG
  * Date: 2023-02-27
  */
-void evalAugmentedJacobianVectorProduct()
+void evalAugmentedJacobianVectorProduct(bool for_preconditioning = false)
 {
     size_t nConserved = GlobalConfig.cqi.n;
 
@@ -2344,6 +2988,17 @@ void evalAugmentedJacobianVectorProduct()
             double dtInv = 1.0/cell.dt_local;
             blk.w[startIdx .. startIdx + nConserved] = dtInv*blk.zed[startIdx .. startIdx + nConserved];
             startIdx += nConserved;
+        }
+
+        if (GlobalConfig.grid_motion == GridMotion.shock_fitting) {
+            // assume global time stepping
+            double dtInv = 1.0 / blk.cells[0].dt_local;
+            int dim = GlobalConfig.dimensions;
+            foreach (vtx; blk.vertices) {
+                if (!vtx.solve_position) continue;
+                blk.w[startIdx .. startIdx + dim] = dtInv * blk.zed[startIdx .. startIdx + dim];
+                startIdx += dim;
+            }
         }
     }
 
@@ -2361,7 +3016,7 @@ void evalAugmentedJacobianVectorProduct()
     }
 
     // Evaluate Jz and place result in zed vector
-    evalJacobianVectorProduct(sigma);
+    evalJacobianVectorProduct(sigma, for_preconditioning);
 
     // Complete the calculation of w: (I/dt)z - Jz
     foreach (blk; parallel(localFluidBlocks,1)) {
@@ -2377,17 +3032,17 @@ void evalAugmentedJacobianVectorProduct()
  * Authors: KAD and RJG
  * Date: 2022-03-02
  */
-void evalJacobianVectorProduct(double sigma)
+void evalJacobianVectorProduct(double sigma, bool for_preconditioning=false)
 {
     version (complex_numbers) {
         if (nkCfg.useRealValuedFrechetDerivative) {
-            evalRealMatVecProd(sigma);
+            evalRealMatVecProd(sigma, for_preconditioning);
         } else {
-            evalComplexMatVecProd(sigma);
+            evalComplexMatVecProd(sigma, for_preconditioning);
         }
     }
     else {
-        evalRealMatVecProd(sigma);
+        evalRealMatVecProd(sigma, for_preconditioning);
     }
 }
 
@@ -2395,16 +3050,47 @@ void evalJacobianVectorProduct(double sigma)
 void evalResidual(int ftl)
 {
     fnCount++;
-    int gtl = 0;
+    int gtl = (GlobalConfig.grid_motion != GridMotion.none) ? ftl : 0;
     double dummySimTime = -1.0;
 
+    
     foreach (blk; parallel(localFluidBlocks,1)) {
         blk.clear_fluxes_of_conserved_quantities();
         foreach (cell; blk.cells) cell.clear_source_vector();
     }
-    exchange_ghost_cell_boundary_data(dummySimTime, 0, ftl);
+
+    if (GlobalConfig.grid_motion != GridMotion.none) {
+        exchange_vertex_positions(gtl);
+        // foreach (blk; parallel(localFluidBlocks,1)) {
+        //     blk.compute_primary_cell_geometric_data(gtl);
+        //     blk.compute_least_squares_setup(gtl);
+        // }
+        exchange_ghost_cell_geometry_data();
+    }
+
+    exchange_ghost_cell_boundary_data(dummySimTime, gtl, ftl);
     foreach (blk; localFluidBlocks) {
-        blk.applyPreReconAction(dummySimTime, 0, ftl);
+        blk.applyPreReconAction(dummySimTime, gtl, ftl);
+    }
+
+    if (GlobalConfig.grid_motion == GridMotion.shock_fitting) {
+        if (activePhase.gridMotionEnabled) {
+            foreach (i, fba; fluidBlockArrays) {
+                if (fba.shock_fitting) { compute_vtx_velocities_for_sf(fba, gtl); }
+            }
+        } else {
+            foreach (blk; parallel(localFluidBlocks, 1)) {
+                foreach (ref v; blk.vertices) {
+                    v.vel[gtl].x = 0.0;
+                    v.vel[gtl].y = 0.0;
+                    v.vel[gtl].z = 0.0;
+                }
+            }
+        }
+
+        foreach (blk; localFluidBlocksBySize) {
+            compute_avg_face_vel(blk, gtl);        
+        }
     }
 
     // We don't want to switch between flux calculator application while
@@ -2428,7 +3114,11 @@ void evalResidual(int ftl)
 
     bool allow_high_order_interpolation = true;
     foreach (blk; parallel(localFluidBlocks,1)) {
-        blk.convective_flux_phase0(allow_high_order_interpolation, gtl);
+        if (GlobalConfig.grid_motion == GridMotion.shock_fitting) {
+            blk.convective_flux_phase0_legacy(allow_high_order_interpolation, gtl);
+        } else {
+            blk.convective_flux_phase0(allow_high_order_interpolation, gtl);
+        }
     }
 
     // for unstructured blocks we need to transfer the convective gradients before the flux calc
@@ -2459,7 +3149,7 @@ void evalResidual(int ftl)
             blk.applyPreSpatialDerivActionAtBndryCells(dummySimTime, gtl, ftl);
         }
         foreach (blk; parallel(localFluidBlocks,1)) {
-            blk.flow_property_spatial_derivatives(0);
+            blk.flow_property_spatial_derivatives(gtl);
         }
         // for unstructured blocks employing the cell-centered spatial (/viscous) gradient method,
         // we need to transfer the viscous gradients before the flux calc
@@ -2469,7 +3159,7 @@ void evalResidual(int ftl)
             // at the cell interfaces before the viscous flux calculation.
             if (blk.myConfig.spatial_deriv_locn == SpatialDerivLocn.cells) {
                 foreach(f; blk.faces) {
-                    f.average_cell_deriv_values(0);
+                    f.average_cell_deriv_values(gtl);
                 }
             }
             blk.estimate_turbulence_viscosity();
@@ -2483,7 +3173,7 @@ void evalResidual(int ftl)
             blk.viscous_flux();
         }
         foreach (blk; localFluidBlocks) {
-            blk.applyPostDiffFluxAction(dummySimTime, 0, ftl);
+            blk.applyPostDiffFluxAction(dummySimTime, gtl, ftl);
         }
     }
 
@@ -2497,7 +3187,7 @@ void evalResidual(int ftl)
             limit_factor = min(1.0, S);
         }
         foreach (i, cell; blk.cells) {
-            cell.add_inviscid_source_vector(0, 0.0);
+            cell.add_inviscid_source_vector(gtl, 0.0);
             if (blk.myConfig.viscous) {
                 cell.add_viscous_source_vector();
             }
@@ -2519,9 +3209,43 @@ void evalResidual(int ftl)
                 getUDFSourceTermsForCell(blk.myL, cell, 0, dummySimTime, blk.myConfig, blk.id, i_cell, j_cell, k_cell);
                 cell.add_udf_source_vector();
             }
-            cell.time_derivatives(0, ftl);
+            cell.time_derivatives(gtl, ftl);
         }
     }
+}
+
+void setJacobianEvalSettings(bool for_preconditioning)
+{
+    alias cfg = GlobalConfig;
+    int spatial_order = (for_preconditioning) ? 1 : activePhase.jacobianInterpolationOrder;
+    foreach (blk; parallel(localFluidBlocks,1)) { 
+        blk.set_interpolation_order(spatial_order);
+    }
+
+    foreach (blk; parallel(localFluidBlocks,1)) {
+        GlobalConfig.frozen_limiter = activePhase.frozenLimiterForJacobian;
+    }
+
+    if (cfg.grid_motion == GridMotion.shock_fitting && activePhase.gridMotionEnabled) {
+        GlobalConfig.shock_fitting_allow_flow_reconstruction = ((spatial_order == 2) && (activePhase.jacobianInterpolationOrder == 2));
+    }
+}
+
+void setResidualEvalSettings()
+{
+    alias cfg = GlobalConfig;
+    foreach (blk; parallel(localFluidBlocks,1)) {
+        blk.set_interpolation_order(activePhase.residualInterpolationOrder);
+    }
+    
+    foreach (blk; parallel(localFluidBlocks,1)) {
+        GlobalConfig.frozen_limiter = activePhase.frozenLimiterForResidual;
+    }
+
+    if (cfg.grid_motion == GridMotion.shock_fitting && activePhase.gridMotionEnabled) {
+        GlobalConfig.shock_fitting_allow_flow_reconstruction = (activePhase.shockFittingAllowInterpolation && (activePhase.residualInterpolationOrder == 2));
+    }
+    
 }
 
 
@@ -2533,13 +3257,14 @@ void evalResidual(int ftl)
  * Authors: KAD and RJG
  * Date: 2022-03-03
  */
-void evalComplexMatVecProd(double sigma)
+void evalComplexMatVecProd(double sigma, bool for_preconditioning)
 {
     version(complex_numbers) {
         alias cfg = GlobalConfig;
 
-        foreach (blk; parallel(localFluidBlocks,1)) { blk.set_interpolation_order(activePhase.jacobianInterpolationOrder); }
-        foreach (blk; parallel(localFluidBlocks,1)) { GlobalConfig.frozen_limiter = activePhase.frozenLimiterForJacobian; }
+        int gtl = (GlobalConfig.grid_motion == GridMotion.none) ? 0 : 1;
+
+        setJacobianEvalSettings(for_preconditioning);
 
         // Make a stack-local copy of conserved quantities info
         size_t nConserved = GlobalConfig.cqi.n;
@@ -2556,8 +3281,28 @@ void evalComplexMatVecProd(double sigma)
                 foreach (ivar; 0 .. nConserved) {
                     cell.U[1][ivar] += complex(0.0, sigma * blk.zed[startIdx+ivar].re);
                 }
-                cell.decode_conserved(0, 1, 0.0);
+                cell.decode_conserved(gtl, 1, 0.0);
                 startIdx += nConserved;
+            }
+
+            if (blk.myConfig.grid_motion != GridMotion.none) {
+                // TODO: Some code paths in decode_conserved depend on the grid properties
+                // so this should really be done before the fluid variabes are handled
+                foreach (i, vtx; blk.vertices) {
+                    if (!vtx.solve_position) { 
+                        // the position of this vertex is solved for in a different block
+                        continue;
+                    }
+                    vtx.pos[1] = vtx.pos[0];
+                    vtx.pos[1].x += complex(0, sigma * blk.zed[startIdx].re);
+                    startIdx++;
+                    vtx.pos[1].y += complex(0, sigma * blk.zed[startIdx].re);
+                    startIdx++;
+                    if (blk.myConfig.dimensions == 3) {
+                        vtx.pos[1].z += complex(0, sigma * blk.zed[startIdx].re); 
+                        startIdx++;
+                    }
+                }
             }
         }
         evalResidual(1);
@@ -2569,15 +3314,37 @@ void evalComplexMatVecProd(double sigma)
                 }
                 startIdx += nConserved;
             }
+
+            if (blk.myConfig.grid_motion != GridMotion.none) {
+                foreach (vtx; blk.vertices) {
+                    if (!vtx.solve_position) { continue; }
+                    blk.zed[startIdx] = vtx.vel[1].x.im/(sigma);
+                    startIdx++;
+                    blk.zed[startIdx] = vtx.vel[1].y.im/(sigma);
+                    startIdx++;
+                    if (blk.myConfig.dimensions == 3) {
+                        blk.zed[startIdx] = vtx.vel[1].z.im/(sigma);
+                        startIdx++;
+                    }
+                }
+            }
             // we must explicitly remove the imaginary components from the cell and interface flowstates
             foreach(cell; blk.cells) { cell.fs.clear_imaginary_components(); }
             foreach(bc; blk.bc) {
                 foreach(ghostcell; bc.ghostcells) { ghostcell.fs.clear_imaginary_components(); }
             }
             foreach(face; blk.faces) { face.fs.clear_imaginary_components(); }
+
+            if (blk.myConfig.grid_motion != GridMotion.none) {
+                foreach(vtx; blk.vertices) { 
+                    vtx.pos[0].clear_imaginary_components();
+                    // vtx.vel[0].clear_imaginary_components();
+                    vtx.pos[1].clear_imaginary_components();
+                    // vtx.vel[1].clear_imaginary_components();
+                }
+            }
         }
-        foreach (blk; parallel(localFluidBlocks,1)) { blk.set_interpolation_order(activePhase.residualInterpolationOrder); }
-        foreach (blk; parallel(localFluidBlocks,1)) { GlobalConfig.frozen_limiter = activePhase.frozenLimiterForResidual; }
+        setResidualEvalSettings();
     } else {
         throw new Error("Oops. Steady-State Solver setting: useComplexMatVecEval is not compatible with real-number version of the code.");
     }
@@ -2591,7 +3358,7 @@ void evalComplexMatVecProd(double sigma)
  * Authors: KAD and RJG
  * Date: 2022-03-03
  */
-void evalRealMatVecProd(double sigma)
+void evalRealMatVecProd(double sigma, bool for_preconditioning)
 {
     foreach (blk; parallel(localFluidBlocks,1)) { blk.set_interpolation_order(activePhase.jacobianInterpolationOrder); }
     foreach (blk; parallel(localFluidBlocks,1)) { GlobalConfig.frozen_limiter = activePhase.frozenLimiterForJacobian; }
@@ -2612,6 +3379,20 @@ void evalRealMatVecProd(double sigma)
             cell.decode_conserved(0, 1, 0.0);
             startIdx += nConserved;
         }
+
+        if (blk.myConfig.grid_motion) {
+            foreach (i, vtx; blk.vertices) {
+                if (!vtx.solve_position) continue;
+                vtx.pos[1].x = vtx.pos[0].x + sigma * blk.zed[startIdx];
+                startIdx++;
+                vtx.pos[1].y = vtx.pos[0].y + sigma * blk.zed[startIdx];
+                startIdx++;
+                if (blk.myConfig.dimensions == 3) {
+                    vtx.pos[1].z = vtx.pos[0].z + sigma * blk.zed[startIdx]; 
+                    startIdx++;
+                }
+            }
+        }
     }
     evalResidual(1);
     foreach (blk; parallel(localFluidBlocks,1)) {
@@ -2622,6 +3403,19 @@ void evalRealMatVecProd(double sigma)
             }
             cell.decode_conserved(0, 0, 0.0);
             startIdx += nConserved;
+        }
+        if (blk.myConfig.grid_motion) {
+            foreach (vtx; blk.vertices) {
+                if (!vtx.solve_position) continue;
+                blk.zed[startIdx] = (vtx.vel[1].x.re - blk.R0[startIdx])/(sigma);
+                startIdx++;
+                blk.zed[startIdx] = (vtx.vel[1].y.re - blk.R0[startIdx])/(sigma);
+                startIdx++;
+                if (blk.myConfig.dimensions == 3) {
+                    blk.zed[startIdx] = (vtx.vel[1].z.re - blk.R0[startIdx])/(sigma);
+                    startIdx++;
+                }
+            }
         }
     }
     foreach (blk; parallel(localFluidBlocks,1)) blk.set_interpolation_order(activePhase.residualInterpolationOrder);
@@ -2960,6 +3754,30 @@ void applyNewtonUpdate(double relaxationFactor)
             }
             startIdx += nConserved;
         }
+
+        if (GlobalConfig.grid_motion) {
+            foreach (vtx; blk.vertices) {
+                if (!vtx.solve_position) { continue; }
+                vtx.pos[0].x += omega * blk.dU[startIdx];
+                startIdx++;
+                vtx.pos[0].y += omega * blk.dU[startIdx];
+                startIdx++;
+                if (GlobalConfig.dimensions == 3) {
+                    vtx.pos[0].z += omega * blk.dU[startIdx];
+                    startIdx++;
+                }
+            }
+        }
+    }
+
+    version(mpi_parallel) { MPI_Barrier(MPI_COMM_WORLD); }
+
+    if (GlobalConfig.grid_motion) {
+        exchange_vertex_positions(0);
+        // foreach (blk; parallel(localFluidBlocks, 1)) {
+        //     blk.compute_primary_cell_geometric_data(0);
+        //     blk.compute_least_squares_setup(0);
+        // }
     }
 }
 
@@ -3050,6 +3868,7 @@ void writeSnapshot(int step, double dt, double cfl, int currentPhase, int stepsI
         version(mpi_parallel) { MPI_Barrier(MPI_COMM_WORLD); }
 
         writeFluidValues(nWrittenSnapshots);
+        writeGrid(nWrittenSnapshots);
         if (nkCfg.writeLimiterValues) {
             writeLimiterValues(nWrittenSnapshots);
         }
@@ -3078,6 +3897,11 @@ void writeSnapshot(int step, double dt, double cfl, int currentPhase, int stepsI
                 auto fromName = fluidFilename(iSnap, blk.id);
                 auto toName = fluidFilename(iSnap-1, blk.id);
                 rename(fromName, toName);
+                if (GlobalConfig.grid_motion != GridMotion.none) {
+                    fromName = gridFilename(iSnap, blk.id);
+                    toName = gridFilename(iSnap-1, blk.id);
+                    rename(fromName, toName);
+                }
                 if (nkCfg.writeLimiterValues) {
                     fromName = limiterFilename(iSnap, blk.id);
                     toName = limiterFilename(iSnap-1, blk.id);
@@ -3097,6 +3921,7 @@ void writeSnapshot(int step, double dt, double cfl, int currentPhase, int stepsI
         }
 
         writeFluidValues(nkCfg.totalSnapshots);
+        writeGrid(nkCfg.totalSnapshots);
         if (nkCfg.writeLimiterValues) {
             writeLimiterValues(nkCfg.totalSnapshots);
         }
@@ -3212,6 +4037,25 @@ void writeFluidValues(int iSnap)
         cells.length = blk.cells.length;
         foreach (i, ref c; cells) c = blk.cells[i];
         fluidBlkIO.writeVariablesToFile(fileName, cells);
+    }
+}
+
+/**
+ * Write the grid to disk
+ */
+void writeGrid(int iSnap)
+{
+    alias cfg = GlobalConfig;
+    if (cfg.grid_motion == GridMotion.none) { return; }
+    if (cfg.is_master_task) {
+        writeln("    |");
+        writeln("    |--> Writing grid");
+    } 
+
+    foreach (blk; localFluidBlocks) {
+        blk.sync_vertices_to_underlying_grid(0);
+        auto gridName = gridFilename(iSnap, blk.id);
+        blk.write_underlying_grid(gridName);
     }
 }
 

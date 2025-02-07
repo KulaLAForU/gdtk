@@ -18,6 +18,10 @@ version(mpi_parallel) {
     import mpi;
 }
 
+import lmr.grid_motion;
+import lmr.grid_motion_udf;
+import lmr.grid_motion_shock_fitting;
+
 import gas.luagas_model;
 import gas;
 import geom;
@@ -131,6 +135,7 @@ public:
     // GMRES iterative solver.
     SMatrix!double JcT; // transposed Jacobian (w.r.t conserved variables)
     ConservedQuantities maxRate, residuals;
+    number[] maxVel; // used for computing scale factors for steady-state shock-fitting
     double normAcc, dotAcc;
     size_t nvars;
     Matrix!number Minv;
@@ -139,6 +144,13 @@ public:
     double[] g0, g1;
     Matrix!double Q1;
     double[] VT;
+
+    // memory for fGMRES
+    double[] ZT; // the preconditioned Krylov vectors used by fGMRES
+    double[] VT_inner; // memory for the Krylov vectors used in the inner iterations of fGMRES
+    double[] inner_x0;
+    double[] inner_g1;
+    double[] inner_R;
     }
 
     this(int id, string label)
@@ -1332,7 +1344,8 @@ public:
         auto cqi = myConfig.cqi;
         auto nConserved = cqi.n;
 
-        flowJacobian = new FlowJacobian(sigma, myConfig.dimensions, nConserved, spatial_order_of_jacobian, ptJac.local.aa.length, ncells);
+        size_t n_vtx = (myConfig.grid_motion != GridMotion.none) ? vertices.length : 0;
+        flowJacobian = new FlowJacobian(sigma, myConfig.dimensions, nConserved, spatial_order_of_jacobian, ptJac.local.aa.length, ncells, n_vtx);
         flowJacobian.local.ia[flowJacobian.ia_idx] = 0;
         flowJacobian.ia_idx += 1;
         size_t n = ptJac.local.ia.length-1;
@@ -1681,6 +1694,17 @@ public:
      *  Its effect should replicate evalRHS() in steadystatecore.d for a subset of cells.
      */
     {
+        // assume static grid for the preconditioner jacobian for the moment.
+        // if (GlobalConfig.grid_motion == GridMotion.shock_fitting) {
+        //     foreach (i, fba; fluidBlockArrays) {
+        //         if (fba.shock_fitting) { compute_vtx_velocities_for_sf(fba, ftl); }
+        //     }
+
+        //     foreach (blk; localFluidBlocksBySize) {
+        //         compute_avg_face_vel(blk, ftl);        
+        //     }
+        // }
+
 
         foreach(iface; iface_list) iface.F.clear();
         foreach(cell; cell_list) cell.clear_source_vector();
@@ -1782,6 +1806,17 @@ public:
 
         size_t m = to!size_t(maxLinearSolverIterations);
         size_t n = nConserved*cells.length;
+
+        // add the number of grid degrees of freedom to the total
+        // number of variables
+        if (myConfig.grid_motion != GridMotion.none) {
+            foreach (ref vtx; vertices) {
+                if (vtx.solve_position) { n += myConfig.dimensions; } 
+            }
+
+            maxVel.length = myConfig.dimensions;
+        }
+
         nvars = n;
         // Now allocate arrays and matrices
         R.length = n;
@@ -1798,6 +1833,53 @@ public:
         g1.length = m+1;
         VT.length = (m+1)*n;
         Q1 = new Matrix!double(m+1, m+1);
+    }
+
+    void allocate_FGMRES_workspace(int maxLinearSolverIterations,
+                                   int maxPreconditioningIterations,
+                                   bool useRealValuedFrechetDerivative)
+    {
+        size_t nConserved = GlobalConfig.cqi.n;
+        int n_species = GlobalConfig.gmodel_master.n_species();
+        int n_modes = GlobalConfig.gmodel_master.n_modes();
+        maxRate = new ConservedQuantities(nConserved);
+        residuals = new ConservedQuantities(nConserved);
+
+        size_t m = to!size_t(maxLinearSolverIterations);
+        size_t m_inner = to!size_t(maxPreconditioningIterations);
+        size_t n = nConserved*cells.length;
+
+        // add the number of grid degrees of freedom to the total
+        // number of variables
+        if (myConfig.grid_motion != GridMotion.none) {
+            foreach (ref vtx; vertices) {
+                if (vtx.solve_position) { n += myConfig.dimensions; } 
+            }
+
+            maxVel.length = myConfig.dimensions;
+        }
+
+        nvars = n;
+        // Now allocate arrays and matrices
+        R.length = n;
+        if (useRealValuedFrechetDerivative) { R0.length = n; }
+        dU.length = n; dU[] = 0.0;
+        r0.length = n;
+        x0.length = n;
+        DinvR.length = n;
+        rhs.length = n;
+        v.length = n;
+        w.length = n;
+        zed.length = n;
+        g0.length = m+1;
+        g1.length = m+1;
+        VT.length = (m+1)*n;
+        Q1 = new Matrix!double(m+1, m+1);
+
+        ZT.length = (m+1)*n;
+        VT_inner.length = (m_inner+1)*n;
+        inner_x0.length = n;
+        inner_g1.length = m_inner+1;
     }
 
     } // end version(newton_krylov)

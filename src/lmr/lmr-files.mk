@@ -56,7 +56,8 @@ LMR_BC_FILES = $(LMR)/bc/package.d \
 	$(LMR)/bc/ghost_cell_effect/ghost_cell.d \
 	$(LMR)/bc/ghost_cell_effect/internal_copy_then_reflect.d \
 	$(LMR)/bc/ghost_cell_effect/flow_state_copy.d \
-	$(LMR)/bc/ghost_cell_effect/flow_state_copy_from_profile.d \
+	$(LMR)/bc/ghost_cell_effect/flow_state_copy_from_static_profile.d \
+	$(LMR)/bc/ghost_cell_effect/flow_state_copy_from_transient_profile.d \
 	$(LMR)/bc/ghost_cell_effect/flow_state_copy_from_history.d \
 	$(LMR)/bc/ghost_cell_effect/synthesise_flow_state.d \
 	$(LMR)/bc/ghost_cell_effect/extrapolate_copy.d \
@@ -70,7 +71,8 @@ LMR_BC_FILES = $(LMR)/bc/package.d \
 	$(LMR)/bc/user_defined_effects.d \
 	$(LMR)/bc/boundary_flux_effect.d \
 	$(LMR)/bc/boundary_cell_effect.d \
-	$(LMR)/bc/boundary_interface_effect.d
+	$(LMR)/bc/boundary_interface_effect.d \
+	$(LMR)/bc/boundary_vertex_full_face_copy.d
 
 LMR_SOLID_FILES := $(LMR)/solid/solidbc.d \
 	$(LMR)/solid/solidblock.d \

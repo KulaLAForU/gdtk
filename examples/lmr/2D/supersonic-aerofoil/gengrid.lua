@@ -195,7 +195,7 @@ ugrid0:set_boundaryset_tag(WEST,  "inflow");  ugrid0:set_boundaryset_tag(NORTH, 
 ugrid1:set_boundaryset_tag(SOUTH, "wall");    ugrid1:set_boundaryset_tag(NORTH, "upper")
 ugrid2:set_boundaryset_tag(SOUTH, "wall");    ugrid2:set_boundaryset_tag(NORTH, "upper")
 ugrid3:set_boundaryset_tag(SOUTH, "wall");    ugrid3:set_boundaryset_tag(NORTH, "upper")
-ugrid4:set_boundaryset_tag(EAST,  "outflow"); ugrid0:set_boundaryset_tag(NORTH, "upper")
+ugrid4:set_boundaryset_tag(EAST,  "outflow"); ugrid4:set_boundaryset_tag(NORTH, "upper")
 
 ugrid5:set_boundaryset_tag(WEST, "inflow");  ugrid5:set_boundaryset_tag(SOUTH, "lower")
 ugrid6:set_boundaryset_tag(NORTH, "wall");    ugrid6:set_boundaryset_tag(SOUTH, "lower")
