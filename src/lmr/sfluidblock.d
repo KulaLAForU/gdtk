@@ -49,6 +49,7 @@ import lmr.grid_motion_udf;
 import lmr.lua_helper;
 import lmr.luawrap.luaflowstate;
 import lmr.onedinterp;
+import lmr.user_defined_source_terms;
 
 // EPSILON parameter for numerical differentiation of flux jacobian
 // Value used based on Vanden and Orkwis (1996), AIAA J. 34:6 pp. 1125-1129
@@ -123,10 +124,18 @@ public:
 
     this(lua_State* L)
     // Generate a new block and fill it with information from a Lua interpreter state.
+    // Expected stack items:
+    //   1. a block id
+    //   2. a grid (structured or unstructured)
+    //   3. a flowstate (could be a Lua fuction)
+    //   4. a value for omegaz
     // This particular constructor is only used in the prep stage.
+    // Note that we assume the FlowState fs to be in a nonrotating frame.
+    // Note also that if we get the flowstate from a user-defined Lua function,
+    // we expect that any needed transformation into the rotated frame is already done.
     {
         auto grid = checkStructuredGrid(L, 2);
-        double omegaz = luaL_checknumber(L, 5);
+        double omegaz = luaL_checknumber(L, 4);
         nic = grid.niv - 1;
         njc = grid.njv - 1;
         nkc = grid.nkv - 1;
@@ -142,18 +151,10 @@ public:
         myConfig.init_gas_model_bits();
         cells.length = ncells; // not defined yet
 
-        // We don't need the full celldata for the prep stage, just the flowstates
-        celldata.flowstates.reserve(ncells);
+        celldata.positions.length = ncells;
+        celldata.volumes.length = ncells;
 
-        bool lua_fs = false;
-        FlowState* myfs;
-        // check where our flowstate is coming from
-        if ( isObjType(L, 3, "number") ) {
-            myfs = checkFlowState(L, 3);
-            lua_settop(L, 0); // clear stack
-        } else if (lua_isfunction(L, 3)) {
-            lua_fs = true;
-        }
+        // First calculate and store the cell positions and volumes.
         Vector3 pos;
         number volume, iLen, jLen, kLen;
         size_t[3] ijk;
@@ -181,16 +182,40 @@ public:
             } else {
                 throw new Exception("GlobalConfig.dimensions not 2 or 3.");
             }
-            if (omegaz != 0.0) { into_rotating_frame(myfs.vel, pos, omegaz); }
-            if (lua_fs) {
-                // Now grab flow state via Lua function call.
-                // If the block is in a rotating frame with omegaz != 0.0,
-                // we presume that the Lua function will provide the velocity
-                // components relative to the rotating frame.
+            celldata.positions[cell_idx] = pos;
+            celldata.volumes[cell_idx] = volume;
+        }
+
+        // For the prep stage, we just need the flowstates and positions and volumes
+        celldata.flowstates.reserve(ncells);
+
+        // Option 1: Initialise flowstates using a single, constant flowstate object.
+        // In a rotating frame simulation, we may have to alter this object
+        // based on position however. See Bugfix by NNG from May 2nd, 2025.
+        if ( isObjType(L, 3, "number") ) {
+            FlowState* myfs = checkFlowState(L, 3);
+            lua_settop(L, 0); // clear stack
+            Vector3 vel_save = Vector3(myfs.vel); // Keep a saved copy of the vel vector
+
+            foreach(cell_idx, ref cell; cells) {
+                if (omegaz != 0.0) {
+                    myfs.vel.set(vel_save);  // Bugfix from write_initial_sg_flow_file.d
+                    into_rotating_frame(myfs.vel, celldata.positions[cell_idx], omegaz);
+                }
+                celldata.flowstates ~= *myfs; // Copy the myfs flowstate into the celldata structure
+                cell = new FluidFVCell(myConfig, celldata.positions[cell_idx], &celldata, celldata.volumes[cell_idx], to!int(cell_idx));
+            }
+        } else if (lua_isfunction(L, 3)) {
+            // Option 2: grab flow state via Lua function call.
+            // If the block is in a rotating frame with omegaz != 0.0,
+            // we presume that the Lua function will provide the velocity
+            // components relative to the rotating frame.
+            FlowState* myfs;
+            foreach(cell_idx, ref cell; cells) {
                 lua_pushvalue(L, 3);
-                lua_pushnumber(L, pos.x);
-                lua_pushnumber(L, pos.y);
-                lua_pushnumber(L, pos.z);
+                lua_pushnumber(L, celldata.positions[cell_idx].x);
+                lua_pushnumber(L, celldata.positions[cell_idx].y);
+                lua_pushnumber(L, celldata.positions[cell_idx].z);
                 if (lua_pcall(L, 3, 1, 0) != 0) {
                     string errMsg = "Error in Lua function call for setting FlowState\n";
                     errMsg ~= "as a function of position (x, y, z).\n";
@@ -207,12 +232,14 @@ public:
                     errMsg ~= "The returned object is not a proper _FlowState handle or table.";
                     luaL_error(L, errMsg.toStringz);
                 }
+                celldata.flowstates ~= *myfs; // Copy the myfs flowstate into the celldata structure
+                cell = new FluidFVCell(myConfig, celldata.positions[cell_idx], &celldata, celldata.volumes[cell_idx], to!int(cell_idx));
             }
-            // make the cell
-            celldata.flowstates ~= *myfs; // Copy the myfs flowstate into the celldata structure
-            cell = new FluidFVCell(myConfig, pos, &celldata, volume, to!int(cell_idx));
+            lua_settop(L, 0);
+        } else {
+            // No other valid options
+            throw new Error("Invalid initial flowstate type.");
         }
-        if (lua_fs) { lua_settop(L, 0); }
     } // end constructor from Lua state
 
     override JSONValue get_header()
@@ -988,13 +1015,14 @@ public:
             foreach (j; 0 .. njc) {
                 foreach (i; 0 .. nic) {
                     size_t c = cell_index(i,j,k);
-                    celldata.c2f[c] ~= ifj_index(i,j+1,k);// north
+                    // These need to be consistent with cell.iface order
+                    celldata.c2f[c] ~= ifi_index(i,j,k);  // west
                     celldata.c2f[c] ~= ifi_index(i+1,j,k);// east
                     celldata.c2f[c] ~= ifj_index(i,j,k);  // south
-                    celldata.c2f[c] ~= ifi_index(i,j,k);  // west
+                    celldata.c2f[c] ~= ifj_index(i,j+1,k);// north
                     if (myConfig.dimensions == 3) {
-                        celldata.c2f[c] ~= ifk_index(i,j,k+1); // top
                         celldata.c2f[c] ~= ifk_index(i,j,k);   // bottom
+                        celldata.c2f[c] ~= ifk_index(i,j,k+1); // top
                     }
                     celldata.nfaces[c] = celldata.c2f[c].length;
                 }
@@ -1005,13 +1033,13 @@ public:
             foreach (j; 0 .. njc) {
                 foreach (i; 0 .. nic) {
                     size_t c = cell_index(i,j,k);
-                    celldata.outsigns[c] ~= 1;// north
-                    celldata.outsigns[c] ~= 1;// east
-                    celldata.outsigns[c] ~= -1;  // south
-                    celldata.outsigns[c] ~= -1;  // west
+                    celldata.outsigns[c] ~= -1; // west
+                    celldata.outsigns[c] ~=  1; // east
+                    celldata.outsigns[c] ~= -1; // south
+                    celldata.outsigns[c] ~=  1; // north
                     if (myConfig.dimensions == 3) {
-                        celldata.outsigns[c] ~= 1; // top
-                        celldata.outsigns[c] ~= -1;   // bottom
+                        celldata.outsigns[c] ~= -1; // bottom
+                        celldata.outsigns[c] ~=  1; // top
                     }
                 }
             }
@@ -1243,7 +1271,6 @@ public:
                         extrap(ghost_cell.pos[gtl], cell_1.pos[gtl], cell_2.pos[gtl]);
                         ghost_cell.volume[gtl] = 2.0*cell_1.volume[gtl] - cell_2.volume[gtl];
                     }
-                    foreach (n; 0 .. n_ghost_cell_layers) f.right_cells[n].update_celldata_geometry();
                 }
             }
         }
@@ -1274,7 +1301,6 @@ public:
                         extrap(ghost_cell.pos[gtl], cell_1.pos[gtl], cell_2.pos[gtl]);
                         ghost_cell.volume[gtl] = 2.0*cell_1.volume[gtl] - cell_2.volume[gtl];
                     }
-                    foreach (n; 0 .. n_ghost_cell_layers) f.left_cells[n].update_celldata_geometry();
                 }
             }
         }
@@ -1305,7 +1331,6 @@ public:
                         extrap(ghost_cell.pos[gtl], cell_1.pos[gtl], cell_2.pos[gtl]);
                         ghost_cell.volume[gtl] = 2.0*cell_1.volume[gtl] - cell_2.volume[gtl];
                     }
-                    foreach (n; 0 .. n_ghost_cell_layers) f.right_cells[n].update_celldata_geometry();
                 }
             }
         }
@@ -1336,7 +1361,6 @@ public:
                         extrap(ghost_cell.pos[gtl], cell_1.pos[gtl], cell_2.pos[gtl]);
                         ghost_cell.volume[gtl] = 2.0*cell_1.volume[gtl] - cell_2.volume[gtl];
                     }
-                    foreach (n; 0 .. n_ghost_cell_layers) f.left_cells[n].update_celldata_geometry();
                 }
             }
         }
@@ -1368,7 +1392,6 @@ public:
                             extrap(ghost_cell.pos[gtl], cell_1.pos[gtl], cell_2.pos[gtl]);
                             ghost_cell.volume[gtl] = 2.0*cell_1.volume[gtl] - cell_2.volume[gtl];
                         }
-                        foreach (n; 0 .. n_ghost_cell_layers) f.right_cells[n].update_celldata_geometry();
                     }
                 }
             }
@@ -1399,7 +1422,6 @@ public:
                             extrap(ghost_cell.pos[gtl], cell_1.pos[gtl], cell_2.pos[gtl]);
                             ghost_cell.volume[gtl] = 2.0*cell_1.volume[gtl] - cell_2.volume[gtl];
                         }
-                        foreach (n; 0 .. n_ghost_cell_layers) f.left_cells[n].update_celldata_geometry();
                     }
                 }
             }
@@ -2926,6 +2948,29 @@ public:
             }
         }
         return index;
+    }
+
+    override void eval_udf_source_vectors(double simTime, size_t gtl, size_t[] cell_list=[])
+    {
+    /*
+        Evaluate the user defined source terms and store them in cell.Qudf.
+        Note that after calling this routine you must call
+        blk.add_udf_source_vectors or cell.add_udf_source_vector to actually
+        apply Qudf to the RHS.
+
+        @author: Nick Gibbons (May 2025)
+    */
+        if (myConfig.udf_source_terms) {
+            if (cell_list.length==0) cell_list = celldata.all_cell_idxs;
+            foreach (i; cell_list) {
+                auto cell = cells[i];
+                auto ijk_indices = to_ijk_indices_for_cell(cell.id);
+                size_t i_cell = ijk_indices[0];
+                size_t j_cell = ijk_indices[1];
+                size_t k_cell = ijk_indices[2];
+                getUDFSourceTermsForCell(myL, cell, gtl, simTime, myConfig, id, i_cell, j_cell, k_cell);
+            }
+        }
     }
 } // end class SFluidBlock
 

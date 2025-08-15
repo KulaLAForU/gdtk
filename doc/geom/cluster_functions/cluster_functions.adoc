@@ -13,6 +13,9 @@ This example clusters toward the beginning of a block boundary, with a relativel
 cf = RobertsFunction:new{end0=true, end1=false, beta=1.01}
 ----
 
+image::roberts-cf-images.png[width=100%, align="center"]
+
+
 == Geometric Function
 
 The geometric function uses a geometric series to grow the cell sizes, starting from a small cell of size `a` and increasing to a second cell of size `ar`, then to a third size of `ar^2`, etc. Eventually, when the cluster function detects that the cells have grown large enough, it switches to a constant cell spacing for the rest of the block. The following example begins with a spacing of one-thousandth the block edge length, and grows by a factor of 1.2 with each step.
@@ -23,6 +26,8 @@ cf = GeometricFunction:new{a=0.001, r=1.2, N=60, reverse=false}
 
 Note that the function needs the `N` argument, which is the number of nodes along the block boundary that is to be clustered, in this case 60. The function also takes a boolean parameter `reverse`, which can be used to start clustering on the other side of the block.
 
+image::geometric-cf-images.png[width=100%, align="center"]
+
 == Gaussian Function
 
 The gaussian function applies a bell-curve shaped compression that can be useful for clustering in the middle of a block, perhaps to resolve a shockwave or other feature of interest. The function takes a nondimensional parameter `m` which can range from 0.0 to 1.0, defining the position of the clustered band; a nondimensional parameter `s` which defines the width of the band, and a parameter `ratio` which controls the tightness of the clustering, where smaller numbers are tighter. In the following example, the clustering is positioned at the 80% mark of the block boundary, using a narrow width of 0.2 and a fairly tight ratio of 0.1:
@@ -30,3 +35,36 @@ The gaussian function applies a bell-curve shaped compression that can be useful
 ----
 cf = GaussianFunction:new{m=0.8, s=0.1, ratio=0.1}
 ----
+
+image::gaussian-cf-images.png[width=100%, align="center"]
+
+== Vinokur Function
+
+The Vinokur function is designed to produce a smooth cell size distribution on an edge which has a constrained cell size at both ends.
+The function requires the number of cells on the edge `n`, the normalised cell size at the start of the edge `s0` and the normalised cell size `s1` at the end of the edge as arguments.
+Note, that the cell sizes are not preserved exactly and can vary significantly, in particular if the cell size varies strongly along the edge.
+Should the grid generation fail with an error message saying `B<1!`, it means that the specified cell sizes are too large to produce a smooth distribution.
+Increasing either cell size or reducing the number of cells will solve the problem.
+The example below specifies a cell size of ten millionths of the edge length at the start and one millionth of the edge length at its end and a total of 50 cells.
+
+----
+cf = VinokurFunction:new{n=50, s0=1e-5, s1=1e-6}
+----
+
+image::vinokur-cf-images.png[width=100%, align="center"]
+
+== Vinokur-Geometric Function Hybrid
+
+The Vinokur-Geometric Hybrid adds geometric series at either end of the cell distribution and uses the Vinokur function for the cell size distribution in between.
+Geometric layers are useful to resolve boundary layers and are specified by a normalised starting cell size, a number of cells and a growth rate.
+In the example below, the first cell is one hundred thousandths of the edge length long and cells two to five are larger than their predecessor by a factor of 1.2.
+The last cell is one millionths of the edge length long and the nine preceding cells are each larger than the next cell by a factor of 1.1.
+This function can also be used to achieve a Vinokur function distribution with exact cell sizes at the ends by setting `n0` and `r0` to one.
+With zero cells in either geometric series the result of the hybrid is the same as the Vinokur function.
+
+----
+cf = VinokurGeomHybridFunction:new{n=50, s0=1e-5, n0=5, r0=1.2, s1=1e-6, n1=10, r1=1.1}
+----
+
+image::vin-geom-cf-images.png[width=100%, align="center"]
+

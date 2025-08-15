@@ -44,6 +44,7 @@ import lmr.grid_motion_udf;
 import lmr.lsqinterp;
 import lmr.lua_helper;
 import lmr.luawrap.luaflowstate;
+import lmr.user_defined_source_terms;
 
 class UFluidBlock: FluidBlock {
 public:
@@ -71,11 +72,18 @@ public:
 
     this(lua_State* L)
     // Construct from a Lua interpreter state.
+    // Expected stack items:
+    //   1. a block id
+    //   2. a grid (structured or unstructured)
+    //   3. a flowstate (could be a Lua function)
+    //   4. a value for omegaz
     // This particular constructor is only used in the prep stage.
     // Note that we assume the FlowState fs to be in a nonrotating frame.
+    // Note also that if we get the flowstate from a user-defined Lua function,
+    // we expect that any needed transformation into the rotated frame is already done.
     {
         auto grid = checkUnstructuredGrid(L, 2);
-        double omegaz = luaL_checknumber(L, 5);
+        double omegaz = luaL_checknumber(L, 4);
         ncells = grid.ncells;
         super(-1, "nil");
         grid_type = Grid_t.structured_grid;
@@ -149,9 +157,7 @@ public:
                     throw new FlowSolverException(msg);
                 }
             }
-            if (omegaz != 0.0) {
-                throw new Error("Oops, we have not yet implemented rotating-frame code here.");
-            }
+            if (myfs && omegaz != 0.0) { into_rotating_frame(myfs.vel, pos, omegaz); }
             if (lua_fs) {
                 // Now grab flow state via Lua function call.
                 // If the block is in a rotating frame with omegaz != 0.0,
@@ -683,7 +689,6 @@ public:
                     ghost0.kLength = inside0.kLength;
                     ghost0.L_min = inside0.L_min;
                     ghost0.L_max = inside0.L_max;
-                    ghost0.update_celldata_geometry();
                 } else {
                     auto inside0 = my_face.right_cell;
                     Vector3 delta; delta = my_face.pos; delta -= inside0.pos[gtl];
@@ -694,7 +699,6 @@ public:
                     ghost0.kLength = inside0.kLength;
                     ghost0.L_min = inside0.L_min;
                     ghost0.L_max = inside0.L_max;
-                    ghost0.update_celldata_geometry();
                 } // end if my_outsign
 
             } // end foreach j
@@ -1053,5 +1057,27 @@ public:
         size_t[] index;
         index = iota(0, ncells, myConfig.nic_write).array();
         return index;
+    }
+
+    override void eval_udf_source_vectors(double simTime, size_t gtl, size_t[] cell_idxs=[])
+    {
+    /*
+        Evaluate the user defined source terms and store them in cell.Qudf.
+        Note that after calling this routine you must call
+        blk.add_udf_source_vectors or cell.add_udf_source_vector to actually
+        apply Qudf to the RHS.
+
+        @author: Nick Gibbons (May 2025)
+    */
+        if (myConfig.udf_source_terms) {
+            if (cell_idxs.length==0) cell_idxs = celldata.all_cell_idxs;
+            foreach (i; cell_idxs) {
+                auto cell = cells[i];
+                size_t i_cell = cell.id;
+                size_t j_cell = 0;
+                size_t k_cell = 0;
+                getUDFSourceTermsForCell(myL, cell, gtl, simTime, myConfig, id, i_cell, j_cell, k_cell);
+            }
+        }
     }
 } // end class UFluidBlock

@@ -13,7 +13,7 @@ module lmr.init;
 
 import std.algorithm : min, sort, find;
 import std.conv : to;
-import std.file : rename, readText, dirEntries, SpanMode;
+import std.file : rename, readText, dirEntries, SpanMode, write;
 import std.format : format, formattedWrite;
 import std.json;
 import std.math: pow;
@@ -26,6 +26,7 @@ import util.json_helper;
 import util.lua;
 import util.lua_service;
 
+import geom.elements.nomenclature;
 import lmr.bc.ghost_cell_effect.gas_solid_full_face_copy;
 import lmr.bc.boundary_vertex_full_face_copy;
 import lmr.bc;
@@ -38,6 +39,7 @@ import lmr.globalconfig;
 import lmr.globaldata;
 import lmr.lmrconfig;
 import lmr.lmrexceptions : LmrException;
+import lmr.lmrerrors;
 import lmr.loads : init_loads_metadata_file, initRunTimeLoads;
 import lmr.lua_helper;
 import lmr.sfluidblock : SFluidBlock;
@@ -48,7 +50,6 @@ import lmr.solid.solid_gas_full_face_copy;
 import lmr.solid.solidfvinterface : initPropertiesAtSolidInterfaces;
 import lmr.solid.ssolidblock : SSolidBlock;
 import lmr.ufluidblock : UFluidBlock;
-import lmr.blockio : BinaryBlockIO, GzipBlockIO;
 
 version(mpi_parallel) {
     import mpi;
@@ -64,12 +65,13 @@ version(mpi_parallel) {
  * Authors: RJG and PAJ
  * Date: 2023-05-7
  */
-void initConfiguration()
+JSONValue initConfiguration()
 {
     // Read in config file and set parameters
     auto cfgData = readJSONfile(lmrCfg.cfgFile);
     set_config_for_core(cfgData);
     set_config_for_blocks(cfgData);
+    return cfgData;
 }
 
 /**
@@ -139,6 +141,25 @@ void readControl()
     // Propagate new values to the local copies of config.
     foreach (localConfig; dedicatedConfig) {
         localConfig.update_control_parameters();
+    }
+}
+
+/**
+ * Write 0th entry into progress file for time-marching simulations
+ *
+ * Creating the 0th entry *is* the initialisation.
+ *
+ * Authors: RJG and PJ
+ * Date: 2025-04-02
+ */
+void initTimeMarchingProgressFile() {
+    if (GlobalConfig.is_master_task) {
+        try {
+            write(lmrCfg.progFile, format("%d\n", SimState.step));
+        }
+        catch (Exception e) {
+            lmrErrorExit(LmrError.inputOutput, "Couldn't write to file: " ~ lmrCfg.progFile);
+        }
     }
 }
 
@@ -258,13 +279,14 @@ void initThreadPool(int maxCPUs, int threadsPerMPITask)
  * Authors: RJG and PAJ
  * Date: 2023-05-07
  */
-void initFluidBlocksBasic(bool withUserPad=false)
+void initFluidBlocksBasic(JSONValue cfgData, bool withUserPad=false)
 {
     foreach (myblk; localFluidBlocks) {
         myblk.myConfig.init_gas_model_bits();
         myblk.init_workspace();
         myblk.init_lua_globals();
-        foreach (bci; myblk.bc) { bci.post_bc_construction(); }
+        myblk.init_boundary_conditions(cfgData["block_" ~ to!string(myblk.id)]);
+        foreach (bci; myblk.bc) { bci.post_bc_construction(); } // TODO: Possible remove this.
         if (withUserPad && GlobalConfig.user_pad_length > 0) {
             push_array_to_Lua(myblk.myL, GlobalConfig.userPad, "userPad");
             foreach (bci; myblk.bc) {
@@ -439,11 +461,15 @@ void initFluidBlocksFlowField(int snapshotStart)
 
 /**
  * Initialise the full-face exchanges at block connections.
+ * Notes:
+ *  - Edited by NNG to use config file instead of the globalBlocks
+ *    boundary conditions + named change (2025-02-11)
+ *
  *
  * Authors: RJG and PAJ
  * Date: 2023-05-07
  */
-void initFullFaceDataExchange()
+void initFullFaceDataExchange(JSONValue cfgData)
 {
     bool anyBlockFail = false;
     foreach (blk; localFluidBlocks) {
@@ -454,21 +480,14 @@ void initFullFaceDataExchange()
                     // The local block thinks that it has an exchange boundary with another block,
                     // so we need to check the ghost-cell effects of the other block's face to see
                     // that it points back to the local block face.
-                    auto other_blk = my_gce.neighbourBlock;
-                    bool ok = false;
-                    auto other_blk_bc = other_blk.bc[my_gce.neighbourFace];
-                    foreach (gce2; other_blk_bc.preReconAction) {
-                        auto other_gce = cast(GhostCellFullFaceCopy)gce2;
-                        if (other_gce &&
-                            (other_gce.neighbourBlock.id == blk.id) &&
-                            (other_gce.neighbourFace == j)) {
-                            ok = true;
-                        }
-                    }
+
+                    size_t other_blk_id   = my_gce.neighbourBlock.id;
+                    size_t other_blk_bndy = my_gce.neighbourFace;
+                    bool ok = checkFullFaceCopyOkay(blk.id, j, other_blk_id, other_blk_bndy, cfgData);
                     if (!ok) {
                         string msg = format("FullFaceCopy for local blk_id=%d face=%d", blk.id, j);
                         msg ~= format(" is not correctly paired with other block id=%d face=%d.",
-                                      other_blk.id, my_gce.neighbourFace);
+                                      other_blk_id, my_gce.neighbourFace);
                         writeln(msg);
                         anyBlockFail = true;
                     }
@@ -485,6 +504,38 @@ void initFullFaceDataExchange()
         throw new LmrException("Failed at initialisation stage during full-face boundary data exchange.");
     }
 }
+
+bool checkFullFaceCopyOkay(size_t blk_id, size_t blk_bndy, size_t oblk_id, size_t oblk_bndy, JSONValue config_jsonData)
+{
+/*
+    Previously, we checked the actual other block to make sure our full face copy had the
+    correct parameters. With the move to initialisating BCs on local blocks only, we need
+    to check the config json instead, which is effectively the same thing.
+
+    @author: Nick Gibbons
+*/
+
+    string oblk_face_string = face_name[oblk_bndy];
+
+    auto oblk_json      = config_jsonData["block_" ~ to!string(oblk_id)];
+    auto oblk_bndy_json = oblk_json["boundary_" ~ oblk_face_string];
+    auto oblk_bces      = oblk_bndy_json["pre_recon_action"].array;
+
+    if (oblk_bces.length == 0) return false;
+    auto oblk_bce = oblk_bces[0];
+
+    string oblk_bce_type = getJSONstring(oblk_bce, "type", "");
+    if (oblk_bce_type != "full_face_copy") return false;
+
+    int oblk_oblk = getJSONint(oblk_bce, "other_block", -1);
+    if (oblk_oblk != blk_id) return false;
+
+    string oblk_oface = getJSONstring(oblk_bce, "other_face", "");
+    if (face_index(oblk_oface) != blk_bndy) return false;
+
+    return true;
+}
+
 
 /**
  * Initialise the mapped-cell exchanges at block connections.
@@ -583,7 +634,7 @@ void initVertexPositionExchange()
     }
 }
 
-void initShockFitting()
+void initShockFitting(JSONValue cfgData)
 {
     // For a simulation with shock fitting, the files defining the rails for
     // vertex motion and the scaling of vertex velocities throughout the blocks
@@ -601,6 +652,7 @@ void initShockFitting()
             // FIX-ME 2024-02-28 PJ Make use of Rowan's config information to find files.
             fba.read_rails_file(format("lmrsim/grid/gridarray-%04d.rails", i));
             fba.read_velocity_weights(format("lmrsim/grid/gridarray-%04d.weights", i));
+            fba.read_shockfitting_inflow(cfgData, i);
         }
     }
 

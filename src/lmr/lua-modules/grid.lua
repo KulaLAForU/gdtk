@@ -20,6 +20,8 @@ function RegisteredGrid:new(o)
    -- tag: a string to identify the grid later in the user's script
    -- fieldType: a string labelling the intended domain as 'fluid' or 'solid'
    -- active: a boolean to indicate if the domain on the grid is active (default: true)
+   -- omegaz: value of the angular velocity about the z-axis for a rotating frame
+   --    Will be 0.0 for a non-rotating-frame.
    -- fsTag: a string that will be used to select the initial flow condition from
    --    a dictionary when the FluidBlock is later constructed.
    -- bcTags: a table of strings that will be used to attach boundary conditions
@@ -39,7 +41,8 @@ function RegisteredGrid:new(o)
    if not flag then
       error("RegisteredGrid constructor expects a single table with named items.", 2)
    end
-   flag = checkAllowedNames(o, {"grid", "tag", "fieldType", "active", "fsTag", "bcTags", "gridArrayId",
+   flag = checkAllowedNames(o, {"grid", "tag", "fieldType", "active", "omegaz",
+                                "fsTag", "bcTags", "gridArrayId",
                                 "ssTag", "solidModelTag", "solidBCTags"})
    if not flag then
       error("Invalid name for item supplied to Grid constructor.", 2)
@@ -71,6 +74,8 @@ function RegisteredGrid:new(o)
    o.ssTag = o.ssTag or ""
    -- Solid properties tag
    o.solidModelTag = o.solidModelTag or ""
+   -- Default non-rotating frame
+   o.omegaz = o.omegaz or 0.0
    -- Must have a grid.
    assert(o.grid, "need to supply a grid")
    -- Check the grid information.
@@ -140,6 +145,7 @@ function RegisteredGrid:tojson()
    str = str .. string.format('  "type": "%s",\n', self.type)
    str = str .. string.format('  "fieldType": "%s",\n', self.fieldType)
    str = str .. string.format('  "active": %s,\n', self.active)
+   str = str .. string.format('  "omegaz": %g,\n', self.omegaz)
    if self.type == "structured_grid" then
       str = str .. string.format('  "dimensions": %d,\n', self.grid:get_dimensions())
       str = str .. string.format('  "niv": %d,\n', self.grid:get_niv())
@@ -199,25 +205,44 @@ end -- end Grid:tojson()
 --
 -- needs storage: connectionList = {}
 
-local function connectGrids(idA, faceA, idB, faceB, orientation)
+local function connectGrids(idA, faceA, idB, faceB, orientation,
+                            reorient_vector_quantities, RmatrixA, RmatrixB)
    -- in 2D, there is only one orientation for connecting a pair of faces.
    -- Since the user will probably not think of providing it, let's default to 0.
    orientation = orientation or 0
+   if reorient_vector_quantities == nil then
+      reorient_vector_quantities = false
+   end
+   RmatrixA = RmatrixA or {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0}
+   RmatrixB = RmatrixB or {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0}
    if false then -- debug
-      print(string.format('connectGrids(idA=%d, faceA="%s", idB=%d, faceB="%s", orientation=%d)',
-                          idA, faceA, idB, faceB, orientation))
+      local msg = string.format('connectGrids(idA=%d, faceA="%s", idB=%d, faceB="%s", orientation=%d,',
+                                idA, faceA, idB, faceB, orientation)
+      msg = msg .. string.format(' reorient_vector_quantities=%s, RmatrixA=%s, RmatrixB=%s)',
+                                 reorient_vector_quantities, RmatrixA, RmatrixB)
+      print(msg)
    end
    local gridA = gridsList[idA+1] -- Note that the id values start at zero.
    local gridB = gridsList[idB+1]
    if gridA.grid:get_type() ~= "structured_grid" or gridB.grid:get_type() ~= "structured_grid" then
       error("connectGrids() Works only for structured grids.", 2)
    end
-   connectionList[#connectionList+1] = {idA=idA, faceA=faceA, idB=idB, faceB=faceB, orientation=orientation}
+   connectionList[#connectionList+1] = {
+      idA=idA, faceA=faceA, idB=idB, faceB=faceB, orientation=orientation,
+      reorient_vector_quantities=reorient_vector_quantities, RmatrixA=RmatrixA, RmatrixB=RmatrixB
+   }
 end
 
+local json = require 'json'
+
 local function connectionAsJSON(c)
-   str = string.format('{"idA": %d, "faceA": "%s", "idB": %d, "faceB": "%s", "orientation": %d}',
-                       c.idA, c.faceA, c.idB, c.faceB, c.orientation)
+   str = '{'
+   str = str .. string.format('"idA": %d, "faceA": "%s", "idB": %d, "faceB": "%s", "orientation": %d,',
+                              c.idA, c.faceA, c.idB, c.faceB, c.orientation)
+   str = str .. string.format(' "reorient_vector_quantities": %s,', tostring(c.reorient_vector_quantities))
+   str = str .. string.format(' "RmatrixA": %s,', json.stringify(c.RmatrixA))
+   str = str .. string.format(' "RmatrixB": %s', json.stringify(c.RmatrixB))
+   str = str .. '}'
    return str
 end
 

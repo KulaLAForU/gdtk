@@ -27,6 +27,8 @@ import std.stdio : File, writeln, writefln, stdout;
 import std.string;
 import std.typecons : Tuple, tuple;
 
+import dyaml;
+
 import geom;
 import nm.bbla;
 import nm.number : number;
@@ -49,6 +51,7 @@ import lmr.globaldata;
 import lmr.init;
 import lmr.lmrconfig;
 import lmr.lmrexceptions;
+import lmr.lmrerrors : LmrError, lmrErrorExit;
 import lmr.lmrwarnings;
 import lmr.lua_helper;
 import lmr.sfluidblock : SFluidBlock;
@@ -194,6 +197,8 @@ struct NKGlobalConfig {
     bool writeResidualValues = false;
     bool writeGradientValues = false;
     bool writeLoads = false;
+    // commands to solver
+    int stepsBetweenCommandsUpdate = 1;
 
     void readValuesFromJSON(JSONValue jsonData)
     {
@@ -222,11 +227,24 @@ struct NKGlobalConfig {
         minRelaxationFactorForUpdate = getJSONdouble(jsonData, "min_relaxation_factor_for_update", minRelaxationFactorForUpdate);
         minRelaxationFactorForCFLGrowth = getJSONdouble(jsonData, "min_relaxation_factor_for_cfl_growth", minRelaxationFactorForCFLGrowth);
         relaxationFactorReductionFactor = getJSONdouble(jsonData, "relaxation_factor_reduction_factor", relaxationFactorReductionFactor);
-	useResidualSmoothing = getJSONbool(jsonData, "use_residual_smoothing", useResidualSmoothing);
-	maxLinearSolverIterations = getJSONint(jsonData, "max_linear_solver_iterations", maxLinearSolverIterations);
+        useResidualSmoothing = getJSONbool(jsonData, "use_residual_smoothing", useResidualSmoothing);
+        maxLinearSolverIterations = getJSONint(jsonData, "max_linear_solver_iterations", maxLinearSolverIterations);
         maxLinearSolverRestarts = getJSONint(jsonData, "max_linear_solver_restarts", maxLinearSolverRestarts);
         useScaling = getJSONbool(jsonData, "use_scaling", useScaling);
         useRealValuedFrechetDerivative = getJSONbool(jsonData, "use_real_valued_frechet_derivative", useRealValuedFrechetDerivative);
+        version(complex_numbers)
+        {
+            {} // do nothing
+            // For complex numbers, we can use either an imagimary perturbation or real
+            // so we DO NOT touch the users choice
+        }
+        else {
+            if (!useRealValuedFrechetDerivative) {
+                writefln("WARNING: use_real_valued_frechet_derivative is set to false in real-valued calculation.");
+                writefln("WARNING: this setting is being overridden; now set to true.");
+                useRealValuedFrechetDerivative = true;
+            }
+        }
         frechetDerivativePerturbation = getJSONdouble(jsonData, "frechet_derivative_perturbation", frechetDerivativePerturbation);
         usePreconditioner = getJSONbool(jsonData, "use_preconditioner", usePreconditioner);
         useFGMRES = getJSONbool(jsonData, "use_fgmres", useFGMRES);
@@ -249,6 +267,7 @@ struct NKGlobalConfig {
         writeResidualValues = getJSONbool(jsonData, "write_residual_values", writeResidualValues);
         writeGradientValues = getJSONbool(jsonData, "write_gradient_values", writeGradientValues);
         writeLoads = getJSONbool(jsonData, "write_loads", writeLoads);
+        stepsBetweenCommandsUpdate = getJSONint(jsonData, "steps_between_commands_update", stepsBetweenCommandsUpdate);
     }
 }
 NKGlobalConfig nkCfg;
@@ -487,9 +506,8 @@ struct RestartInfo {
 
     this(this)
     {
-	residuals = residuals.dup;
+        residuals = residuals.dup;
     }
-
 }
 RestartInfo[] snapshots;
 
@@ -612,7 +630,7 @@ void initNewtonKrylovSimulation(int snapshotStart, int maxCPUs, int threadsPerMP
     SimState.wall_clock_start = Clock.currTime();
 
     // Initialise baseline configuration
-    initConfiguration();
+    JSONValue cfgData= initConfiguration();
     // After loading configuration, we can check if there are any settings
     // that are not particularly appropriate for the steady-state solver.
     if (cfg.extrema_clipping) {
@@ -637,7 +655,7 @@ void initNewtonKrylovSimulation(int snapshotStart, int maxCPUs, int threadsPerMP
      */
     initThreadPool(1, 1);
 
-    initFluidBlocksBasic();
+    initFluidBlocksBasic(cfgData);
     initFluidBlocksMemoryAllocation();
     initFluidBlocksGlobalCellIDStarts();
     initFluidBlocksZones();
@@ -645,7 +663,7 @@ void initNewtonKrylovSimulation(int snapshotStart, int maxCPUs, int threadsPerMP
 
     version(mpi_parallel) { MPI_Barrier(MPI_COMM_WORLD); }
 
-    initFullFaceDataExchange();
+    initFullFaceDataExchange(cfgData);
     initMappedCellDataExchange();
     initGhostCellGeometry();
     initLeastSquaresStencils();
@@ -666,7 +684,7 @@ void initNewtonKrylovSimulation(int snapshotStart, int maxCPUs, int threadsPerMP
     }
 
     if (GlobalConfig.grid_motion == GlobalConfig.grid_motion.shock_fitting) {
-        initShockFitting();
+        initShockFitting(cfgData);
     }
 
     orderBlocksBySize();
@@ -831,6 +849,8 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
     int stepsIntoCurrentPhase = 0;
     bool updatePreconditionerThisStep = false;
     CFLSelector cflSelector;
+    bool enableWriteSnapshotAfterCheck = true;
+    int savedSnapshotAfterCheckStep = -1;
 
     /*----------------------------------------------
      * Initialisation
@@ -1078,7 +1098,7 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
          *---
          *    a. change of phase
          *    b. limiter freezing
-	 *    c. compute CFl for this step
+         *    c. compute CFl for this step
          *    d. set the timestep
          *    e. set flag on preconditioner
          */
@@ -1115,35 +1135,35 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
             }
         }
 
-	// 0b. Compute the CFL for this step
-	if (step > startStep) { // because starting step is taken care of specially BEFORE this loop
-	    if (numberBadSteps == 0) {
-		// then previous update was fine, so proceed to get a new CFL value
-		if (activePhase.useAutoCFL) {
-		    // We need to be careful in the early steps with the auto CFL.
-		    // On step 1, we have no previous residual, so we can't make an adjustment.
-		    // Also, we need to check on a residual drop, but this makes no sense
-		    // until the reference residuals are established.
-		    if (step > nkCfg.numberOfStepsForSettingReferenceResiduals &&
-                        omega >= nkCfg.minRelaxationFactorForCFLGrowth) { // TODO: consider only limiting CFL growth based on the relaxation factor for the residual-based cflSelector
-			cfl = cflSelector.nextCFL(cfl, step, globalResidual, prevGlobalResidual, globalResidual/referenceGlobalResidual);
-		    }
-		}
-		else {
-		    cfl = cflSelector.nextCFL(-1.0, step, -1.0, -1.0, -1.0);
-		}
+        // 0b. Compute the CFL for this step
+        if (step > startStep) { // because starting step is taken care of specially BEFORE this loop
+	        if (numberBadSteps == 0) {
+                // then previous update was fine, so proceed to get a new CFL value
+                if (activePhase.useAutoCFL) {
+                    // We need to be careful in the early steps with the auto CFL.
+                    // On step 1, we have no previous residual, so we can't make an adjustment.
+                    // Also, we need to check on a residual drop, but this makes no sense
+                    // until the reference residuals are established.
+                    if (step > nkCfg.numberOfStepsForSettingReferenceResiduals &&
+                      omega >= nkCfg.minRelaxationFactorForCFLGrowth) { // TODO: consider only limiting CFL growth based on the relaxation factor for the residual-based cflSelector
+                       cfl = cflSelector.nextCFL(cfl, step, globalResidual, prevGlobalResidual, globalResidual/referenceGlobalResidual);
+                    }
+                }
+                else {
+                    cfl = cflSelector.nextCFL(-1.0, step, -1.0, -1.0, -1.0);
+                }
             }
-	    else {
-		// Presume last step was bad, so we reduce the CFL (if doing auto CFL)
-		cfl *= nkCfg.cflReductionFactor;
-		if (cfl <= nkCfg.cflMin) {
-		    writeln("The CFL has been reduced due a bad step, but now it has dropped below the minimum allowable CFL.");
-		    writefln("current cfl = %e  \t minimum allowable cfl = %e", cfl, nkCfg.cflMin);
-		    writeln("Bailing out!");
-		    exit(1);
-		}
-	    }
-	}
+            else {
+                // Presume last step was bad, so we reduce the CFL (if doing auto CFL)
+                cfl *= nkCfg.cflReductionFactor;
+                if (cfl <= nkCfg.cflMin) {
+                    writeln("The CFL has been reduced due a bad step, but now it has dropped below the minimum allowable CFL.");
+                    writefln("current cfl = %e  \t minimum allowable cfl = %e", cfl, nkCfg.cflMin);
+                    writeln("Bailing out!");
+                    exit(1);
+                }
+            }
+        }
 
         // 0c. Set the timestep for this step
         dt = setDtInCells(cfl, activePhase.useLocalTimestep);
@@ -1171,13 +1191,13 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
             solveNewtonStep(updatePreconditionerThisStep);
         }
 
-	/* 1a. perform a physicality check if required */
+        /* 1a. perform a physicality check if required */
         omega = nkCfg.usePhysicalityCheck ? determineRelaxationFactor() : 1.0;
 
-	/* 1b. do a line search if required */
-	if ( (omega > nkCfg.minRelaxationFactorForUpdate) && nkCfg.useLineSearch ) {
-	    omega = applyLineSearch(omega);
-	}
+        /* 1b. do a line search if required */
+        if ( (omega > nkCfg.minRelaxationFactorForUpdate) && nkCfg.useLineSearch ) {
+            omega = applyLineSearch(omega);
+        }
 
         /* 1c. check if we achived the allowable linear solver tolerance */
         bool failedToAchieveAllowableLinearSolverTolerance =
@@ -1194,13 +1214,13 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
                 // We need to bail out at this point.
                 // User can probably restart with less aggressive CFL schedule.
                 if (GlobalConfig.is_master_task) {
-                    writeln("Update failure in Newton step.");
-                    writefln("step= %d, CFL= %e, dt= %e, global-residual= %e ", step, cfl, dt, globalResidual);
-                    writeln("Error message from failed update:");
-                    writefln("%s", e.msg);
-                    writeln("You might be able to try a smaller CFL.");
-                    writeln("Bailing out!");
-                    exit(1);
+                    string exitMsg = "Update failure in Newton step.\n";
+                    exitMsg ~= format("step= %d, CFL= %e, dt= %e, global-residual= %e \n", step, cfl, dt, globalResidual);
+                    exitMsg ~= "Error message from failed update:\n";
+                    exitMsg ~= format("%s", e.msg);
+                    exitMsg ~= "You might be able to try a smaller CFL.\n";
+                    exitMsg ~= "Bailing out!\n";
+                    lmrErrorExit(LmrError.unrecoverableUpdate, exitMsg);
                 }
             }
             numberBadSteps = 0;
@@ -1208,11 +1228,11 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
         else if ((omega < nkCfg.minRelaxationFactorForUpdate || failedToAchieveAllowableLinearSolverTolerance) && activePhase.useAutoCFL) {
             numberBadSteps++;
             if (numberBadSteps == nkCfg.maxConsecutiveBadSteps) {
-                writeln("Too many consecutive bad steps while trying to update flow state.\n");
-                writefln("Number of bad steps = %d", numberBadSteps);
-                writefln("Last attempted CFL = %e", cfl);
-                writeln("Bailing out!");
-                exit(1);
+                string exitMsg = "Too many consecutive bad steps while trying to update flow state.\n";
+                exitMsg ~= format("Number of bad steps = %d\n", numberBadSteps);
+                exitMsg ~= format("Last attempted CFL = %e\n", cfl);
+                exitMsg ~= "Bailing out!\n";
+                lmrErrorExit(LmrError.unrecoverableUpdate, exitMsg);
             }
             // Return flow states to their original state for next attempt.
             foreach (blk; parallel(localFluidBlocks,1)) {
@@ -1223,10 +1243,10 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
         }
         else {
             if (GlobalConfig.is_master_task) {
-                writeln("WARNING: relaxation factor for Newton update is very small.");
-                writefln("step= %d, relaxation factor= %f", step, omega);
-                writeln("Bailing out!");
-                exit(1);
+                string exitMsg = "ERROR: relaxation factor for Newton update is too small.\n";
+                exitMsg ~= format("step= %d, relaxation factor= %f\n", step, omega);
+                exitMsg ~= "Bailing out!\n";
+                lmrErrorExit(LmrError.hitNumericalRailGuard, exitMsg);
             }
         }
 
@@ -1267,9 +1287,6 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
                 }
             }
         }
-
-        // [TODO] Add in a halt_now condition.
-
 
 
         /*---
@@ -1341,6 +1358,104 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
                 writefln("FINAL-CFL: %.3e", cfl);
 	        }
             break;
+        }
+
+        /*---
+         * 2d. Process interrupt commands from file
+         *---
+         * Note we do this as the last action because this might be
+         * setting up configuration for the next step. For example,
+         * if there's an instruction to alter CFL, we would first like
+         * to report what it was on this step, then make that adjustment
+         * ahead of the next step.
+         *
+         * We need to set a priority on how we process interrupt commands.
+         * That priority is:
+         *  1. Take action on any write commands
+         *  2. Take action on any stop commands
+         *  3. Take action on any commands to alter simulation settings for
+         *     next steps.
+         *
+         * At the end of commands execution, we reset certain items:
+         * those that would cause a undesirable repeating loop of actions
+         * on every step. We reset, the user can then take action.
+         * A typical example will be any commands of the form "at-next-step"
+         */
+
+         /* [TODO] RJG, 2025-04-05
+          * We need to think how well this implementation will behave on MPI.
+          * Presently, every rank will read the commands file. This might become
+          * a bottleneck.
+          * The alternative is to gather info at master and broadcast.
+          * However, the implementation is not settled yet, so I don't
+          * want to muck around with the decisions of which information
+          * to broadcast via MPI.
+          */
+        
+        if ( (step % nkCfg.stepsBetweenCommandsUpdate) == 0)  {
+            // The following logic could be extracted to a function but...
+            // I need access to a lot of the state that is associated with
+            // taking a step. Presently, we'll handle the commands processing here.
+            Node runTimeCmds = dyaml.Loader.fromFile(lmrCfg.nkCmdsFile).load();
+            if ("write-snapshot" in runTimeCmds) {
+                bool writeNow = false;
+                if ("at-next-check" in runTimeCmds["write-snapshot"]) {
+                    writeNow = runTimeCmds["write-snapshot"]["at-next-check"].as!bool;
+                    if (writeNow && cfg.is_master_task) {
+                          writeln("*** COMMAND-ACTION: write-snapshot/at-next-check activated.");
+                    }
+                }
+                if ("at-next-check-after-step" in runTimeCmds["write-snapshot"] && !writeNow) {
+                    auto stepMinForWriting = runTimeCmds["write-snapshot"]["at-next-check-after-step"].as!int;
+                    if (savedSnapshotAfterCheckStep != stepMinForWriting) {
+                        enableWriteSnapshotAfterCheck = true;
+                        savedSnapshotAfterCheckStep = stepMinForWriting;
+                    }
+                    
+                    if (stepMinForWriting <= step && stepMinForWriting > 0 && enableWriteSnapshotAfterCheck) {
+                        writeNow = true;
+                        if (cfg.is_master_task) {
+                            writefln("*** COMMAND-ACTION: write-snapshot/at-next-check-after-step activated -- step-trigger= %d, current-step= %d", stepMinForWriting, step);
+                        }
+                        // We turn off writing snapshots until we find a change in stepMinForWriting
+                        enableWriteSnapshotAfterCheck = false;
+                    }
+                }
+                // For the present, we will just a write a snapshot into the
+                // sequence of snapshots. It might be better to use a special
+                // designator for on-demand snapshots.
+                if (writeNow) {
+                    writeSnapshot(step, dt, cfl, currentPhase, stepsIntoCurrentPhase, nWrittenSnapshots);
+                }
+            }
+
+            if ("stop" in runTimeCmds) {
+                bool stopNow;
+                if ("at-next-check" in runTimeCmds["stop"]) {
+                    stopNow = runTimeCmds["stop"]["at-next-check"].as!bool;
+                    if (stopNow && cfg.is_master_task) {
+                        writeln("*** COMMAND-ACTION: stop/at-next-check activated.");
+                    }
+                }
+                if ("at-next-check-after-step" in runTimeCmds["stop"] && !stopNow) {
+                    auto stepMinForStopping = runTimeCmds["stop"]["at-next-check-after-step"].as!int;
+                    if (stepMinForStopping <= step && stepMinForStopping > 0) {
+                        stopNow = true;
+                        if (cfg.is_master_task) {
+                            writefln("*** COMMAND-ACTION: stop/at-next-check-after-step activated -- step-trigger= %d, current-step= %d", stepMinForStopping, step);
+                        }
+                    }
+                }
+                if (stopNow) {
+                    if (cfg.is_master_task) {
+                        writeln("*** STOPPING: Stop action detected in commands file.");
+                        writeln("STOP-REASON: commands-file-action");
+                        writefln("FINAL-STEP: %d", step);
+                        writefln("FINAL-CFL: %.3e", cfl);
+                    }
+                    break;
+                }
+            }
         }
     }
 }
@@ -3046,7 +3161,6 @@ void evalJacobianVectorProduct(double sigma, bool for_preconditioning=false)
     }
 }
 
-
 void evalResidual(int ftl)
 {
     fnCount++;
@@ -3194,23 +3308,10 @@ void evalResidual(int ftl)
             if (blk.myConfig.reacting) {
                 cell.add_thermochemical_source_vector(blk.thermochem_source, limit_factor);
             }
-            if (blk.myConfig.udf_source_terms) {
-                size_t i_cell = cell.id;
-                size_t j_cell = 0;
-                size_t k_cell = 0;
-                if (blk.grid_type == Grid_t.structured_grid) {
-                    auto sblk = cast(SFluidBlock) blk;
-                    assert(sblk !is null, "Oops, this should be an SFluidBlock object.");
-                    auto ijk_indices = sblk.to_ijk_indices_for_cell(cell.id);
-                    i_cell = ijk_indices[0];
-                    j_cell = ijk_indices[1];
-                    k_cell = ijk_indices[2];
-                }
-                getUDFSourceTermsForCell(blk.myL, cell, 0, dummySimTime, blk.myConfig, blk.id, i_cell, j_cell, k_cell);
-                cell.add_udf_source_vector();
-            }
-            cell.time_derivatives(gtl, ftl);
         }
+        blk.eval_udf_source_vectors(SimState.time, gtl);
+        blk.add_udf_source_vectors();
+        blk.time_derivatives(gtl, ftl);
     }
 }
 

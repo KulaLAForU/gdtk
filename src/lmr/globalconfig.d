@@ -1395,6 +1395,7 @@ public:
     Vector3 gravity;
     ConservedQuantitiesIndices* cqi;
     GasdynamicUpdate gasdynamic_update_scheme;
+    bool eval_udf_source_terms_at_each_stage;
     size_t n_flow_time_levels;
     bool residual_smoothing;
     bool with_local_time_stepping;
@@ -1579,6 +1580,7 @@ public:
         // Presumably these times, not all of the GlobalConfig is needed, so press on doing what can be done.
         if (cfg.cqi) { cqi = new ConservedQuantitiesIndices(*(cfg.cqi)); }
         gasdynamic_update_scheme = cfg.gasdynamic_update_scheme;
+        eval_udf_source_terms_at_each_stage = cfg.eval_udf_source_terms_at_each_stage;
         n_flow_time_levels = cfg.n_flow_time_levels;
         residual_smoothing = cfg.residual_smoothing;
         with_local_time_stepping = cfg.with_local_time_stepping;
@@ -2354,7 +2356,11 @@ void set_config_for_core(JSONValue jsonData)
     sdluo.usePreconditioner = getJSONbool(sdluOptions, "use_preconditioner",  sdluo.usePreconditioner);
     */
     // Parameters controlling size of storage arrays - we set this here since we key it off some of the other config parameters
-    cfg.n_flow_time_levels = 1 + number_of_stages_for_update_scheme(cfg.gasdynamic_update_scheme);
+    if (cfg.solverMode == SolverMode.steady) {
+        cfg.n_flow_time_levels = 2;
+    } else {
+        cfg.n_flow_time_levels = 1 + number_of_stages_for_update_scheme(cfg.gasdynamic_update_scheme);
+    }
     // [TODO] RJG, 2024-02-11
     //        Do we need this with the lmr5 I/O arrangement? Perhaps not. BlockIO should know what to do.
     /*
@@ -2445,12 +2451,7 @@ void set_config_for_blocks(JSONValue jsonData)
             initUDFSolidSourceTerms(sblk.myL, cfg.udfSolidSourceTermsFile);
         }
     }
-    foreach (blk; globalBlocks) {
-        auto myblk = cast(FluidBlock) blk;
-        if (myblk) {
-            myblk.init_boundary_conditions(jsonData["block_" ~ to!string(myblk.id)]);
-        }
-    }
+    // Removed globalBlocks boundary condition init here. NNG (Feb 2025)
     // [TODO] RJG, 2024-02-11
     // This code here has a dependency on base_file_name. Need to clean this up.
     /*

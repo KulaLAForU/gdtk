@@ -12,6 +12,7 @@ import std.file;
 import std.datetime;
 import std.algorithm;
 import std.range;
+import std.parallelism : parallel, defaultPoolThreads;
 
 import nm.schedule;
 import util.json_helper;
@@ -42,23 +43,23 @@ __gshared static EndCondition[] ecs;
 __gshared static Diaphragm[] diaphragms;
 
 struct SimulationData {
-    int step = 0;
-    int halt_now = 0;
-    double sim_time = 0.0;
-    double dt_global;
-    double cfl;
-    double t_plot;
-    double t_hist;
-    int tindx;
-    int steps_since_last_plot_write;
-    int steps_since_last_hist_write;
+    shared int step = 0;
+    shared int halt_now = 0;
+    shared double sim_time = 0.0;
+    shared double dt_global;
+    shared double cfl;
+    shared double t_plot;
+    shared double t_hist;
+    shared int tindx;
+    shared int steps_since_last_plot_write;
+    shared int steps_since_last_hist_write;
     SysTime wall_clock_start;
 }
 
 __gshared static SimulationData sim_data;
 
 
-void init_simulation(int tindx_start)
+void init_simulation(int tindx_start, int maxCPUs)
 {
     sim_data.tindx = tindx_start;
     sim_data.wall_clock_start = Clock.currTime();
@@ -273,6 +274,20 @@ void init_simulation(int tindx_start)
             writeln(format("  state=%s", dia.state));
         }
     }
+    // Now that all dynamic components are established,
+    // revisit the gas slugs and set up the ghost cells.
+    foreach (i, s; gasslugs) {
+        s.set_up_ghost_cells();
+    }
+    //
+    // We are going to allow calculation over the gasslugs to be run in parallel.
+    // There is no point in running more threads than the maximum for the processor
+    // and there are occasions that we wish to limit the number of threads.
+    int extraThreadsInPool = min(maxCPUs-1, max(gasslugs.length-1, 0));
+    // total number of threads = main thread + extra-threads-in-Pool
+    defaultPoolThreads(extraThreadsInPool);
+    writefln("Number of threads requested: %d", extraThreadsInPool+1);
+    //
     // Note that, for a restart, sim_time will generally be nonzero
     sim_data.dt_global = L1dConfig.dt_init;
     sim_data.sim_time = get_time_from_times_file(tindx_start);
@@ -299,6 +314,10 @@ void integrate_in_time()
     sim_data.step = 0;
     append(L1dConfig.job_name~"/events.txt", format("t=%e Begin stepping\n", sim_data.sim_time));
     //
+    // To allow parallelism across gasslugs, we need some storage for intermediate data.
+    shared static double[] local_dt_allow;
+    local_dt_allow.length = gasslugs.length;
+    //
     // Main time loop.
     while (sim_data.sim_time <= L1dConfig.max_time &&
            sim_data.step <= L1dConfig.max_step &&
@@ -309,17 +328,17 @@ void integrate_in_time()
         // 1. Set the size of the time step.
         if ((sim_data.step % L1dConfig.cfl_count) == 0) {
             sim_data.cfl = L1dConfig.cfl_schedule.get_value(sim_data.sim_time);
-            double dt_allowed = gasslugs[0].suggested_time_step(sim_data.cfl);
-            foreach (i; 1 .. gasslugs.length) {
-                dt_allowed = min(dt_allowed, gasslugs[i].suggested_time_step(sim_data.cfl));
+            foreach (i, gs; parallel(gasslugs, 1)) {
+                local_dt_allow[i] = gs.suggested_time_step(sim_data.cfl);
             }
+            double dt_allowed = minElement(local_dt_allow);
             if (dt_allowed < sim_data.dt_global) {
                 // Reduce immediately.
                 sim_data.dt_global = dt_allowed;
             } else {
                 // Cautious increase, only if we have taken some steps.
                 if (sim_data.step > 0) {
-                    sim_data.dt_global += 0.5*(dt_allowed - sim_data.dt_global);
+                    sim_data.dt_global = 0.5*(dt_allowed + sim_data.dt_global);
                 }
             }
         }
@@ -332,7 +351,7 @@ void integrate_in_time()
         }
         // 3. Record current state of dynamic components.
         foreach (p; pistons) { p.record_state(); }
-        foreach (s; gasslugs) {
+        foreach (s; parallel(gasslugs, 1)) {
             s.compute_areas_and_volumes();
             s.encode_conserved();
             s.record_state();
@@ -351,8 +370,13 @@ void integrate_in_time()
                 }
                 // 4.2 Update dynamic elements.
                 foreach (s; gasslugs) {
+                    s.update_ghost_cell_data();
+                }
+                foreach (s; parallel(gasslugs, 1)) {
                     s.time_derivatives(0, sim_data.sim_time);
                     s.predictor_step(sim_data.dt_global);
+                }
+                foreach (s; gasslugs) {
                     if (s.bad_cells() > 0) { throw new Exception("Bad cells"); }
                 }
                 foreach (p; pistons) {
@@ -363,8 +387,8 @@ void integrate_in_time()
                 writefln("Predictor step failed e.msg=%s", e.msg);
                 step_failed = true;
                 foreach (p; pistons) { p.restore_state(); }
-                foreach (s; gasslugs) { s.restore_state(); }
-                sim_data.dt_global *= 0.2;
+                foreach (s; parallel(gasslugs, 1)) { s.restore_state(); }
+                sim_data.dt_global = 0.2 * sim_data.dt_global;
             }
             if (L1dConfig.t_order == 2 && !step_failed) {
                 try {
@@ -375,8 +399,13 @@ void integrate_in_time()
                     }
                     // 5.2 Update dynamic elements.
                     foreach (s; gasslugs) {
+                        s.update_ghost_cell_data();
+                    }
+                    foreach (s; parallel(gasslugs, 1)) {
                         s.time_derivatives(1, sim_data.sim_time+sim_data.dt_global);
                         s.corrector_step(sim_data.dt_global);
+                    }
+                    foreach (s; gasslugs) {
                         if (s.bad_cells() > 0) { throw new Exception("Bad cells"); }
                     }
                     foreach (p; pistons) {
@@ -387,19 +416,22 @@ void integrate_in_time()
                     writefln("Corrector step failed e.msg=%s", e.msg);
                     step_failed = true;
                     foreach (p; pistons) { p.restore_state(); }
-                    foreach (s; gasslugs) { s.restore_state(); }
-                    sim_data.dt_global *= 0.2;
+                    foreach (s; parallel(gasslugs, 1)) { s.restore_state(); }
+                    sim_data.dt_global = 0.2 * sim_data.dt_global;
                     continue;
                 }
             }
             if (L1dConfig.reacting && !step_failed) {
-                foreach (s; gasslugs) { s.chemical_increment(sim_data.dt_global); }
+                foreach (s; parallel(gasslugs, 1)) { s.chemical_increment(sim_data.dt_global); }
             }
         } while (step_failed && (attempt_number <= 3));
         if (step_failed) {
             throw new Exception("Step failed after 3 attempts.");
         }
-        // 6. Occasional console output.
+        // 6. For variable-mass piston modelling.
+        foreach (p; pistons) { p.change_mass(sim_data.dt_global); }
+        //
+        // 7. Occasional console output.
         if (L1dConfig.verbosity_level >= 1 &&
             ((sim_data.step % L1dConfig.print_count) == 0)) {
             // For reporting wall-clock time, convert with precision of milliseconds.
@@ -414,23 +446,23 @@ void integrate_in_time()
                      sim_data.cfl, elapsed_s, WCtFT, WCtMS);
             stdout.flush();
         }
-        // 7. Update time and (maybe) write solution.
-        sim_data.step += 1;
-        sim_data.sim_time += sim_data.dt_global;
+        // 8. Update time and (maybe) write solution.
+        sim_data.step = sim_data.step + 1;
+        sim_data.sim_time = sim_data.sim_time + sim_data.dt_global;
         if (sim_data.sim_time >= sim_data.t_plot) {
             write_state_gasslugs_pistons_diaphragms();
-            sim_data.t_plot += L1dConfig.dt_plot.get_value(sim_data.sim_time);
+            sim_data.t_plot = sim_data.t_plot + L1dConfig.dt_plot.get_value(sim_data.sim_time);
             sim_data.steps_since_last_plot_write = 0;
         } else {
-            sim_data.steps_since_last_plot_write++;
+            sim_data.steps_since_last_plot_write = sim_data.steps_since_last_plot_write + 1;
         }
         if (sim_data.sim_time >= sim_data.t_hist) {
-            write_data_at_history_locations(sim_data.sim_time);
+            write_data_at_history_locations_and_cells(sim_data.sim_time);
             write_energies(sim_data.sim_time);
-            sim_data.t_hist += L1dConfig.dt_hist.get_value(sim_data.sim_time);
+            sim_data.t_hist = sim_data.t_hist + L1dConfig.dt_hist.get_value(sim_data.sim_time);
             sim_data.steps_since_last_hist_write = 0;
         } else {
-            sim_data.steps_since_last_hist_write++;
+            sim_data.steps_since_last_hist_write = sim_data.steps_since_last_hist_write + 1;
         }
     } // End main time loop.
     //
@@ -440,7 +472,7 @@ void integrate_in_time()
         write_state_gasslugs_pistons_diaphragms();
     }
     if (sim_data.steps_since_last_hist_write > 0) {
-        write_data_at_history_locations(sim_data.sim_time);
+        write_data_at_history_locations_and_cells(sim_data.sim_time);
         write_energies(sim_data.sim_time);
     }
     return;
@@ -449,7 +481,7 @@ void integrate_in_time()
 
 void write_state_gasslugs_pistons_diaphragms()
 {
-    sim_data.tindx += 1;
+    sim_data.tindx = sim_data.tindx + 1;
     if (L1dConfig.verbosity_level >= 1) {
         writeln("Write state data at tindx=", sim_data.tindx);
     }
@@ -488,7 +520,7 @@ void write_state_gasslugs_pistons_diaphragms()
 } // end write_state_gasslugs_pistons_diaphragms()
 
 
-void write_data_at_history_locations(double t)
+void write_data_at_history_locations_and_cells(double t)
 {
     foreach (i; 0 .. L1dConfig.hloc_n) {
         string fileName = L1dConfig.job_name ~ format("/history-loc-%04d.data", i);
@@ -497,8 +529,16 @@ void write_data_at_history_locations(double t)
         foreach (s; gasslugs) { s.write_history_loc_data(fp, t, x); }
         fp.close();
     }
+    foreach (s; gasslugs) {
+    	foreach (j; s.hcells) {
+    		string fileName = L1dConfig.job_name ~ format("/history-cell-%04d-in-slug-%04d.data", j, s.indx);
+	    	File fp = File(fileName, "a");
+	    	s.write_history_cell_data(fp, t, j);
+	    	fp.close();
+    	}
+    }
     return;
-} // end write_data_at_history_locations()
+} // end write_data_at_history_locations_and_cells()
 
 
 void write_energies(double t)

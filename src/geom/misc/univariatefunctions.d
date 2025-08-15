@@ -135,8 +135,8 @@ public:
     }
     this(const RobertsFunction other)
     {
-        this.end0 = end0;
-        this.end1 = end1;
+        end0 = other.end0;
+        end1 = other.end1;
         beta = other.beta;
         alpha = other.alpha;
         reverse = other.reverse;
@@ -302,11 +302,23 @@ public:
         this.m = m;
         this.s = s;
         this.ratio = ratio;
-        if ((m<=0.0) || (m>=1.0)) throw new Error("Problematic parameters in GaussianFunction m= "~to!string(m));
-        if ((ratio<=0.0) || (ratio>=1.0)) throw new Error("Problematic parameters in GaussianFunction ratio= "~to!string(ratio));
+        if ((m<0.0) || (m>1.0)) throw new Error("Problematic parameters in GaussianFunction m= "~to!string(m));
+        if ((ratio<=0.0) || (ratio>1.0)) throw new Error("Problematic parameters in GaussianFunction ratio= "~to!string(ratio));
         // See derivation 20/12/11 (NNG)
-        this.a = 1.0/(1.0+sqrt(pi/2.0)*(1.0-ratio)*s*(erf((m-1.0)/sqrt(2.0)/s) - erf(m/sqrt(2.0)/s)));
-        this.c = -sqrt(pi/2.0)*a*(1-ratio)*s*erf(m/sqrt(2.0)/s);
+
+        // Iterate to ensure cluster center is at m.
+        double b = m;
+        double a,c,err;
+        foreach(n; 0 .. 100) {
+            a = 1.0/(1.0+sqrt(pi/2.0)*(1.0-ratio)*s*(erf((b-1.0)/sqrt(2.0)/s) - erf(b/sqrt(2.0)/s)));
+            c = -sqrt(pi/2.0)*a*(1-ratio)*s*erf(b/sqrt(2.0)/s);
+            err = (a*b + c) - m;  // Center of the cluster is at opCall(b) = a*b + c
+            if (fabs(err)<1e-15) break;
+            b -= err * (a*ratio); // Newton update, d/dx(opCall)(b) = a*ratio
+        }
+        this.a = a;
+        this.b = b;
+        this.c = c;
     }
 
     this(const GaussianFunction other)
@@ -325,11 +337,11 @@ public:
 
     override double opCall(double x) const
     {
-        return a*x + sqrt(pi/2.0)*a*(1.0-ratio)*s*erf((m-x)/sqrt(2.0)/s) + c;
+        return a*x + sqrt(pi/2.0)*a*(1.0-ratio)*s*erf((b-x)/sqrt(2.0)/s) + c;
     }
 
 private:
-    double m,s,ratio,a,c;
+    double m,s,ratio,a,b,c;
     immutable double pi = 3.1415926535;
     immutable double p  = 0.3275911;
     immutable double a1 = 0.254829592;
@@ -338,7 +350,7 @@ private:
     immutable double a4 =-1.453152027;
     immutable double a5 = 1.061405429;
 
-    const double erf(double x){
+    double erf(double x) const {
         /*
             Approximate the gaussian error function using curve fitted polynomial
             "Handbook of Mathematical Functions with Formulas, Graphs, and Mathematical Tables", NIST
@@ -554,24 +566,24 @@ class VinokurFunction : UnivariateFunction {
 
    Inputs:
      n - The number of cells on the edge
-     s1 - The normalised size of the first cell
-     sn - The normalised size of the last cell
+     s0 - The normalised size of the cell at end0
+     s1 - The normalised size of the cell at end1
 
    @author: Jens Kunze
 */
 public:
-    this(int n, double s1, double sn)
+    this(int n, double s0, double s1)
     {
         this.n = n;
+        this.s0 = s0;
         this.s1 = s1;
-        this.sn = sn;
-        this.A = sqrt(sn / s1);
-        double B = 1 / (n * sqrt(sn * s1));
+        this.A = sqrt(s1 / s0);
+        double B = 1 / (n * sqrt(s1 * s0));
         this.B = B;
         if (B<1.0)  {
             string msg = "Problematic parameters in VinokurGeomHybridFunction B<1!, B= "~to!string(B);
-            msg ~= "\nnormalised first cell size: "~to!string(s1);
-            msg ~= "\nnormalised last cell size: "~to!string(sn);
+            msg ~= "\nnormalised end0 cell size: "~to!string(s0);
+            msg ~= "\nnormalised end1 cell size: "~to!string(s1);
             msg ~= "\nnumber of cells: "~to!string(n);
             throw new Error(msg);
         }
@@ -605,8 +617,8 @@ public:
     this(const VinokurFunction other)
     {
         n = other.n;
+        s0 = other.s0;
         s1 = other.s1;
-        sn = other.sn;
         A = other.A;
         B = other.B;
         beta = other.beta;
@@ -625,7 +637,7 @@ public:
 
 private:
     int n;
-    double s1,sn,A,B,beta_min,beta_max,tol,beta;
+    double s0,s1,A,B,beta_min,beta_max,tol,beta;
 } // end class VinokurFunction
 
 class VinokurGeomHybridFunction : UnivariateFunction {
@@ -638,44 +650,44 @@ class VinokurGeomHybridFunction : UnivariateFunction {
 
    Inputs:
      n - The number of cells on the edge
-     s1 - The normalised size of the first cell
-     n1 - The number of cells in the geometric layer at the start of the edge
-     r1 - The size ratio between adjacent cells in the geometric layer
-     sn - The normalised size of the last cell
-     nn - The number of cells in the geometric layer at the end of the edge
-     rn - The size ratio between adjacent cells in the geometric layer
+     s0 - The normalised size of the cell at end0
+     n0 - The number of cells in the geometric layer at the start of the edge (end0)
+     r0 - The size ratio between adjacent cells in the geometric layer growing from end0
+     s1 - The normalised size of the cell at end1
+     n1 - The number of cells in the geometric layer at the end of the edge (end1)
+     r1 - The size ratio between adjacent cells in the geometric layer growing from end1
 
    @author: Jens Kunze
 */
 public:
-    this(int n=50, double s1=1.0e-2, int n1=0, double r1=1.2, double sn=1.0e-2, int nn=0, double rn=1.2)
+    this(int n, double s0, int n0, double r0, double s1, int n1, double r1)
     {
         this.n = n;
+        this.s0 = s0;
+        this.n0 = n0;
+        this.r0 = r0;
+        this.l0 = geometricSeriesLength(s0, r0, n0);
         this.s1 = s1;
         this.n1 = n1;
         this.r1 = r1;
         this.l1 = geometricSeriesLength(s1, r1, n1);
-        this.sn = sn;
-        this.nn = nn;
-        this.rn = rn;
-        this.ln = geometricSeriesLength(sn, rn, nn);
-        this.vs1 = s1*pow(r1,n1)/(1 - l1 - ln);
-        this.vsn = sn*pow(rn,nn)/(1 - l1 - ln);
-        this.vn = n - n1 - nn;
+        this.vs0 = s0*pow(r0,n0)/(1 - l0 - l1);
+        this.vs1 = s1*pow(r1,n1)/(1 - l0 - l1);
+        this.vn = n - n0 - n1;
         if (vn<1) {
             string msg = "Problematic parameters in VinokurGeomHybridFunction vn= "~to!string(vn);
             msg ~= "\nnumber of cells: "~to!string(n);
-            msg ~= "\nnumber geometric layers at start: "~to!string(n1);
+            msg ~= "\nnumber geometric layers at start: "~to!string(n0);
             msg ~= "\nnumber geometric layers at end: "~to!string(vn);
             throw new Error(msg);
         }
-        this.A = sqrt(vsn / vs1);
-        double B = 1 / (vn * sqrt(vsn * vs1));
+        this.A = sqrt(vs1 / vs0);
+        double B = 1 / (vn * sqrt(vs1 * vs0));
         this.B = B;
         if (B<1.0) {
             string msg = "Problematic parameters in VinokurGeomHybridFunction B<1!, B= "~to!string(B);
-            msg ~= "\nnormalised first cell size: "~to!string(vs1);
-            msg ~= "\nnormalised last cell size: "~to!string(vsn);
+            msg ~= "\nnormalised first cell size: "~to!string(vs0);
+            msg ~= "\nnormalised last cell size: "~to!string(vs1);
             msg ~= "\nnumber of cells: "~to!string(vn);
             throw new Error(msg);
         }
@@ -709,16 +721,16 @@ public:
     this(const VinokurGeomHybridFunction other)
     {
         n = other.n;
+        s0 = other.s0;
+        r0 = other.r0;
+        n0 = other.n0;
+        l0 = other.l0;
         s1 = other.s1;
         r1 = other.r1;
         n1 = other.n1;
         l1 = other.l1;
-        sn = other.sn;
-        rn = other.rn;
-        nn = other.nn;
-        ln = other.ln;
+        vs0 = other.vs0;
         vs1 = other.vs1;
-        vsn = other.vsn;
         vn = other.vn;
         A = other.A;
         B = other.B;
@@ -732,20 +744,20 @@ public:
 
     override double opCall(double x) const
     {
-        if (x<=to!double(n1)/to!double(n)){
-            return geometricSeriesLength(s1, r1, to!int(round(x*n)));
+        if (x<=to!double(n0)/to!double(n)){
+            return geometricSeriesLength(s0, r0, to!int(round(x*n)));
         }
-        if (x>1-to!double(nn)/to!double(n)){
-            return 1 - geometricSeriesLength(sn, rn, n - to!int(round(x*n)));
+        if (x>1-to!double(n1)/to!double(n)){
+            return 1 - geometricSeriesLength(s1, r1, n - to!int(round(x*n)));
         }
-        double xi = (x - to!double(n1)/to!double(n))/(1 - to!double(nn)/to!double(n) - to!double(n1)/to!double(n));
+        double xi = (x - to!double(n0)/to!double(n))/(1 - to!double(n1)/to!double(n) - to!double(n0)/to!double(n));
         double u = 0.5*(1 + tanh(beta*(xi - 0.5))/tanh(0.5*beta));
-        return u/(A + (1 - A)*u)*(1 - ln - l1) + l1;
+        return u/(A + (1 - A)*u)*(1 - l1 - l0) + l0;
     }
 
 private:
-    int n,n1,nn,vn;
-    double s1,r1,l1,sn,rn,ln,vs1,vsn,A,B,beta_min,beta_max,tol,beta;
+    int n,n0,n1,vn;
+    double s0,r0,l0,s1,r1,l1,vs0,vs1,A,B,beta_min,beta_max,tol,beta;
 
     const double geometricSeriesLength(double s, double r, int n) {
         if (r==1.0){return s * n;}
@@ -766,6 +778,7 @@ version(univariatefunctions_test) {
         auto cf3 = new GeometricFunction(0.005, 1.1, 40, false);
         assert(isClose(cf3(0.1), 0.0225106, 1.0e-4), failedUnitTest());
         assert(isClose(cf3(0.9), 0.85256413, 1.0e-4), failedUnitTest());
+        test_gaussian_function_curvature();
         auto cf4 = new GaussianFunction(0.5, 0.1, 0.2);
         assert(isClose(cf4(0.1), 0.1250750, 1.0e-4), failedUnitTest());
         assert(isClose(cf4(0.9), 0.8749249, 1.0e-4), failedUnitTest());
@@ -773,5 +786,48 @@ version(univariatefunctions_test) {
         assert(isClose(cf5(0.1), 0.0518068, 1.0e-4), failedUnitTest());
         assert(isClose(cf5(0.9), 0.8984721, 1.0e-4), failedUnitTest());
         return 0;
+    }
+
+    double bisect_iterate(alias f)(double p0, double p1) {
+        int count = 0;
+        double f0 = f(p0);
+        double f1 = f(p1);
+        if (f0*f1 > 0.0) {
+            throw new Exception("Does not bracket an odd number of roots.");
+        }
+        double pmid = 0.5*(p0+p1);
+        double fmid = f(pmid);
+        do {
+            if (f0*fmid < 0.0) {
+                p1 = pmid; f1 = fmid;
+            } else {
+                p0 = pmid; f0 = fmid;
+            }
+            pmid = 0.5*(p0+p1);
+            fmid = f(pmid);
+            count += 1;
+        } while ((fabs(p1-p0)/pmid > 1e-6) && (fabs(fmid) > 1e-6));
+        return pmid;
+    }
+
+    void test_gaussian_function_curvature() {
+        /// Ensure the inflection point of the gaussian cluster function is at m.
+        // Solve the input (test-point) required for a value of m, and then
+        // check that curvature == 0 and slope >= 0.
+        double test_point, slope, curvature;
+        double h = 1.0e-3;  // Step in finite difference test
+        foreach (m; [0.0, 0.1, 0.5, 0.9, 1.0]) {
+            auto cf = new GaussianFunction(m, 0.1, 0.2);
+            if ((m == 0.0) || (m == 1.0)) {
+                // The cluster center must be at the edge
+                test_point = m;
+            } else {
+                test_point = bisect_iterate!((x) => cf(x) - m)(0.0, 1.0);
+            }
+            slope = (cf(test_point+h) - cf(test_point-h)) / (2*h);
+            curvature = (cf(test_point+h) - 2*cf(test_point) + cf(test_point-h)) / (h*h);
+            assert(slope >= 0.0, failedUnitTest());
+            assert(fabs(curvature) <= 1.0e-3, failedUnitTest());
+        }
     }
 } // end univariatefunctions_test

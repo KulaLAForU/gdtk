@@ -16,7 +16,7 @@ function FluidBlock:new(o)
       error("Make sure that you are using FluidBlock:new{} and not FluidBlock.new{}", 2)
    end
    o = o or {}
-   flag = checkAllowedNames(o, {"grid", "gridMetadata", "initialState", "fillCondition", "active",
+   flag = checkAllowedNames(o, {"gridMetadata", "initialState", "fillCondition", "active",
                                 "label", "omegaz", "may_be_turbulent", "bcList", "bcDict",
                                 "hcellList", "xforceList"})
    if not flag then
@@ -34,9 +34,9 @@ function FluidBlock:new(o)
       error('Have previously defined a FluidBlock with label "' .. o.label .. '"', 2)
    end
    fluidBlocksDict[o.label] = o.id
-   -- Must have a grid and initialState
-   assert(o.grid or o.gridMetadata, "need to supply a grid or its metadata")
-   assert(o.initialState, "need to supply an initialState")
+   -- Must have a gridMetadata and initialState
+   assert(o.gridMetadata, "need to supply gridMetadata")
+   assert(o.initialState, "need to supply initialState")
    if getmetatable(o.initialState) == FlowSolution then
       -- Let's build a initialState function here from a FlowSolution.
       o.initialState = makeFlowStateFn(o.initialState)
@@ -45,7 +45,6 @@ function FluidBlock:new(o)
    if o.active == nil then
       o.active = true
    end
-   o.omegaz = o.omegaz or 0.0
    if o.may_be_turbulent == nil then
       o.may_be_turbulent = true
    end
@@ -56,125 +55,66 @@ function FluidBlock:new(o)
    end
    o.hcellList = o.hcellList or {}
    o.xforceList = o.xforceList or {}
-   -- Check the grid information.
-   if o.grid then
-      if config.dimensions ~= o.grid:get_dimensions() then
-         local msg = string.format("Mismatch in dimensions, config %d grid %d.",
-                                   config.dimensions, o.grid:get_dimensions())
-         error(msg)
+   --
+   -- Check the gridMetadata information.
+   if config.dimensions ~= o.gridMetadata.dimensions then
+      local msg = string.format("Mismatch in dimensions, config %d grid %d.",
+                                config.dimensions, o.gridMetadata.dimensions)
+      error(msg)
+   end
+   if o.gridMetadata.type == "structured_grid" then
+      -- Extract some information from the StructuredGrid
+      -- Note 0-based indexing for vertices and cells.
+      o.nic = o.gridMetadata.nic
+      o.njc = o.gridMetadata.njc
+      o.nkc = o.gridMetadata.nkc
+      o.ncells = o.nic * o.njc * o.nkc
+      -- The following table p for the corner locations,
+      -- may be used later for testing for block connections.
+      o.p = {}
+      if config.dimensions == 3 then
+         o.p[0] = o.gridMetadata.p0
+         o.p[1] = o.gridMetadata.p1
+         o.p[2] = o.gridMetadata.p2
+         o.p[3] = o.gridMetadata.p3
+         o.p[4] = o.gridMetadata.p4
+         o.p[5] = o.gridMetadata.p5
+         o.p[6] = o.gridMetadata.p6
+         o.p[7] = o.gridMetadata.p7
+      else
+         o.p[0] = o.gridMetadata.p0
+         o.p[1] = o.gridMetadata.p1
+         o.p[2] = o.gridMetadata.p2
+         o.p[3] = o.gridMetadata.p3
       end
-      if o.grid:get_type() == "structured_grid" then
-         -- Extract some information from the StructuredGrid
-         -- Note 0-based indexing for vertices and cells.
-         o.nic = o.grid:get_niv() - 1
-         o.njc = o.grid:get_njv() - 1
-         if config.dimensions == 3 then
-            o.nkc = o.grid:get_nkv() - 1
-         else
-            o.nkc = 1
-         end
-         o.ncells = o.nic * o.njc * o.nkc
-         -- The following table p for the corner locations,
-         -- is to be used later for testing for block connections.
-         o.p = {}
-         if config.dimensions == 3 then
-            o.p[0] = o.grid:get_vtx(0, 0, 0)
-            o.p[1] = o.grid:get_vtx(o.nic, 0, 0)
-            o.p[2] = o.grid:get_vtx(o.nic, o.njc, 0)
-            o.p[3] = o.grid:get_vtx(0, o.njc, 0)
-            o.p[4] = o.grid:get_vtx(0, 0, o.nkc)
-            o.p[5] = o.grid:get_vtx(o.nic, 0, o.nkc)
-            o.p[6] = o.grid:get_vtx(o.nic, o.njc, o.nkc)
-            o.p[7] = o.grid:get_vtx(0, o.njc, o.nkc)
-         else
-            o.p[0] = o.grid:get_vtx(0, 0)
-            o.p[1] = o.grid:get_vtx(o.nic, 0)
-            o.p[2] = o.grid:get_vtx(o.nic, o.njc)
-            o.p[3] = o.grid:get_vtx(0, o.njc)
-         end
-         -- print("FluidBlock id=", o.id, "p0=", tostring(o.p[0]), "p1=", tostring(o.p[1]),
-         --       "p2=", tostring(o.p[2]), "p3=", tostring(o.p[3]))
-         -- Attach default boundary conditions for those not specified.
-         -- Note that, in the classic preparation, the structured-grid bcs arrive in bcList.
-         for _,face in ipairs(faceList(config.dimensions)) do
-            o.bcList[face] = o.bcList[face] or WallBC_WithSlip:new()
-         end
-      end
-      if o.grid:get_type() == "unstructured_grid" then
-         -- Extract some information from the UnstructuredGrid
-         o.ncells = o.grid:get_ncells()
-         o.nvertices = o.grid:get_nvertices()
-         o.nfaces = o.grid:get_nfaces()
-         o.nboundaries = o.grid:get_nboundaries()
-         -- Attach boundary conditions from list or from the dictionary of conditions.
-         for i = 0, o.nboundaries-1 do
-            local mybc = o.bcList[i]
-            if (mybc == nil) and o.bcDict then
-               local tag = o.grid:get_boundaryset_tag(i)
-               mybc = o.bcDict[tag]
-            end
-            mybc = mybc or WallBC_WithSlip:new() -- default boundary condition
-            o.bcList[i] = mybc
-         end
-      end
-   else -- We have gridMetadata
-      if config.dimensions ~= o.gridMetadata.dimensions then
-         local msg = string.format("Mismatch in dimensions, config %d grid %d.",
-                                   config.dimensions, o.gridMetadata.dimensions)
-         error(msg)
-      end
-      if o.gridMetadata.type == "structured_grid" then
-         -- Extract some information from the StructuredGrid
-         -- Note 0-based indexing for vertices and cells.
-         o.nic = o.gridMetadata.nic
-         o.njc = o.gridMetadata.njc
-         o.nkc = o.gridMetadata.nkc
-         o.ncells = o.nic * o.njc * o.nkc
-         -- The following table p for the corner locations,
-         -- may be used later for testing for block connections.
-         o.p = {}
-         if config.dimensions == 3 then
-            o.p[0] = o.gridMetadata.p0
-            o.p[1] = o.gridMetadata.p1
-            o.p[2] = o.gridMetadata.p2
-            o.p[3] = o.gridMetadata.p3
-            o.p[4] = o.gridMetadata.p4
-            o.p[5] = o.gridMetadata.p5
-            o.p[6] = o.gridMetadata.p6
-            o.p[7] = o.gridMetadata.p7
-         else
-            o.p[0] = o.gridMetadata.p0
-            o.p[1] = o.gridMetadata.p1
-            o.p[2] = o.gridMetadata.p2
-            o.p[3] = o.gridMetadata.p3
-         end
-         -- print("FluidBlock id=", o.id, "p0=", tostring(o.p[0]), "p1=", tostring(o.p[1]),
-         --       "p2=", tostring(o.p[2]), "p3=", tostring(o.p[3]))
-         -- Attach default boundary conditions for those not specified.
-         -- Note that, in the staged-preparation, the bcs arrive as bcDict.
-         for _,face in ipairs(faceList(config.dimensions)) do
-            o.bcList[face] = o.bcDict[face] or WallBC_WithSlip:new()
-         end
-      end
-      if o.gridMetadata.type == "unstructured_grid" then
-         -- Extract some information from the UnstructuredGrid
-         o.ncells = o.gridMetadata.ncells
-         o.nvertices = o.gridMetadata.nvertices
-         o.nfaces = o.gridMetadata.nfaces
-         o.nboundaries = o.gridMetadata.nboundaries
-         -- Attach boundary conditions from list or from the dictionary of conditions.
-         for i = 0, o.nboundaries-1 do
-            local mybc = o.bcList[i]
-            if (mybc == nil) and o.bcDict then
-               local key = tostring(i)
-               local tag = o.gridMetadata.bcTags[key]
-               mybc = o.bcDict[tag]
-            end
-            mybc = mybc or WallBC_WithSlip:new() -- default boundary condition
-            o.bcList[i] = mybc
-         end
+      -- print("FluidBlock id=", o.id, "p0=", tostring(o.p[0]), "p1=", tostring(o.p[1]),
+      --       "p2=", tostring(o.p[2]), "p3=", tostring(o.p[3]))
+      -- Attach default boundary conditions for those not specified.
+      -- Note that, in the staged-preparation, the bcs arrive as bcDict.
+      for _,face in ipairs(faceList(config.dimensions)) do
+         o.bcList[face] = o.bcDict[face] or WallBC_WithSlip:new()
       end
    end
+   if o.gridMetadata.type == "unstructured_grid" then
+      -- Extract some information from the UnstructuredGrid
+      o.ncells = o.gridMetadata.ncells
+      o.nvertices = o.gridMetadata.nvertices
+      o.nfaces = o.gridMetadata.nfaces
+      o.nboundaries = o.gridMetadata.nboundaries
+      -- Attach boundary conditions from list or from the dictionary of conditions.
+      for i = 0, o.nboundaries-1 do
+         local mybc = o.bcList[i]
+         if (mybc == nil) and o.bcDict then
+            local key = tostring(i)
+            local tag = o.gridMetadata.bcTags[key]
+            mybc = o.bcDict[tag]
+         end
+         mybc = mybc or WallBC_WithSlip:new() -- default boundary condition
+         o.bcList[i] = mybc
+      end
+   end
+   -- The user may override the omegaz value that was set when registering the grid.
+   o.omegaz = o.omegaz or o.gridMetadata.omegaz
    return o
 end -- FluidBlock:new(o)
 
@@ -283,7 +223,8 @@ local function SBlock2UBlock(blk)
    fluidBlocksDict[newLabel] = nil
 end -- SBlock2UBlock()
 
-local function connectBlocks(blkA, faceA, blkB, faceB, orientation)
+local function connectBlocks(blkA, faceA, blkB, faceB, orientation,
+                             reorient_vector_quantities, RmatrixA, RmatrixB)
    -- Make a "full-face" connection between a pair of Block objects.
    -- The connection is made by attaching boundary conditions
    -- to each block that reference the other block.
@@ -291,7 +232,9 @@ local function connectBlocks(blkA, faceA, blkB, faceB, orientation)
       -- To reduce visual clutter at prep time, don't use the following print statement.
       -- It may still be useful for debugging.
       print("connectBlocks: blkA.id=", blkA.id, "faceA=", faceA,
-            "blkB.id=", blkB.id, "faceB=", faceB, "orientation=", orientation)
+            "blkB.id=", blkB.id, "faceB=", faceB, "orientation=", orientation,
+            "reorient_vector_quantities=", reorient_vector_quantities,
+            "RmatrixA=", dump(RmatrixA), "RmatrixB=", dump(RmatrixB))
    end
    -- Note that, when doing staged preparation, we may not have the grid object
    -- actually present at the point of making a FluidBlock connection.
@@ -303,10 +246,14 @@ local function connectBlocks(blkA, faceA, blkB, faceB, orientation)
           "connectBlocks requires faceA and faceB to be strings.")
    --
    if blkA.myType == "FluidBlock" and blkB.myType == "FluidBlock" then
-      blkA.bcList[faceA] = ExchangeBC_FullFace:new{otherBlock=blkB.id, otherFace=faceB,
-						   orientation=orientation}
-      blkB.bcList[faceB] = ExchangeBC_FullFace:new{otherBlock=blkA.id, otherFace=faceA,
-						   orientation=orientation}
+      blkA.bcList[faceA] = ExchangeBC_FullFace:new{
+         otherBlock=blkB.id, otherFace=faceB, orientation=orientation,
+         reorient_vector_quantities=reorient_vector_quantities,
+         Rmatrix=RmatrixA}
+      blkB.bcList[faceB] = ExchangeBC_FullFace:new{
+         otherBlock=blkA.id, otherFace=faceA, orientation=orientation,
+         reorient_vector_quantities=reorient_vector_quantities,
+         Rmatrix=RmatrixB}
       -- [TODO] need to test for matching corner locations and consistent numbers of cells
    elseif blkA.myType == "FluidBlock" and blkB.myType == "SolidBlock" then
       -- The preprocessor will set the time-accurate fluid/solid coupling BC by default unless the user explicitly requests the alternate

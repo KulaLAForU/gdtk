@@ -5,10 +5,12 @@ import std.stdio;
 import lmr.commands.command;
 import lmr.commands.computenorms;
 import lmr.commands.customscript;
+import lmr.commands.deformgrid;
 import lmr.commands.extractline;
 import lmr.commands.gradient2vtk;
 import lmr.commands.limiter2vtk;
 import lmr.commands.listspecies;
+import lmr.commands.loads2vtk;
 import lmr.commands.plotdiagnostics;
 import lmr.commands.prepenergyexchange;
 import lmr.commands.prepgas;
@@ -18,6 +20,7 @@ import lmr.commands.prepreactions;
 import lmr.commands.prepsim;
 import lmr.commands.probeflow;
 import lmr.commands.residual2vtk;
+import lmr.commands.restore_default_run_time_commands;
 import lmr.commands.revisionid;
 import lmr.commands.sliceflow;
 import lmr.commands.slicesolid;
@@ -57,13 +60,14 @@ Show help for a given Eilmer command or topic.
     // 1. Add user commands
     commands["compute-norms"] = compNormsCmd;
     commands["custom-script"] = customScriptCmd;
+    commands["deform-grid"] = deformGridCmd;
     commands["extract-line"] = extractLineCmd;
-    commands["limiter2vtk"] = limiter2vtkCmd;
     commands["gradient2vtk"] = gradient2vtkCmd;
+    commands["limiter2vtk"] = limiter2vtkCmd;
+    commands["loads2vtk"] = loads2vtkCmd;
     commands["list-species"] = listSpeciesCmd;
     // alias for list-species, provided for consistency with prep-gas tool
     commands["list-available-species"] = commands["list-species"];
-    commands["residual2vtk"] = residual2vtkCmd;
     commands["plot-diagnostics"] = plotDiagnosticsCmd;
     commands["prep-energy-exchange"] = prepExchCmd;
     // alias for 'prep-energy-exchange' provided for consistency with prep-kinetics tool
@@ -78,6 +82,8 @@ Show help for a given Eilmer command or topic.
     commands["prep-flow"] = commands["prep-sim"]; // alias for prep-sim
     commands["prep-mapped-cells"] = prepMappedCellsCmd;
     commands["probe-flow"] = probeFlowCmd;
+    commands["residual2vtk"] = residual2vtkCmd;
+    commands["restore-default-run-time-commands"] = restoreDfltCmd;
     commands["revision-id"] = revisionIdCmd;
     commands["run"] = runCmd;
     commands["slice-flow"] = sliceFlowCmd;

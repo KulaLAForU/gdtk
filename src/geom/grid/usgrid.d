@@ -272,6 +272,7 @@ public:
     this(ref File fin, size_t id)
     // constructor from raw binary file content
     {
+        this.id = id;
         int[1] buf1;
         fin.rawRead(buf1);
         cell_type = to!USGCell_type(buf1[0]);
@@ -1150,7 +1151,7 @@ public:
             Vector3 pmid = Vector3(0,0,0);
             foreach (vid; vtx_id_list) { pmid += vertices[vid]; }
             pmid /= nv;
-            // Compute the vector area is triangle sections.
+            // Compute the vector area in triangle sections.
             foreach (i; 0 .. nv-1) {
                 auto p0 = vertices[vtx_id_list[i]];
                 auto p1 = vertices[vtx_id_list[i+1]];

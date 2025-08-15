@@ -385,6 +385,12 @@ function FixedComposition:tojson()
    return str
 end
 
+ZeroChargedSpecies = BoundaryInterfaceEffect:new{}
+ZeroChargedSpecies.type = "zero_charged_species"
+function ZeroChargedSpecies:tojson()
+   return string.format('          {"type": "%s"}', self.type)
+end
+
 
 UpdateThermoTransCoeffs = BoundaryInterfaceEffect:new{thermoUpdate="pT"}
 UpdateThermoTransCoeffs.type = "update_thermo_trans_coeffs"
@@ -838,6 +844,9 @@ function WallBC_NoSlip_FixedT0:new(o)
    if o.catalytic_type == "fixed_composition" then
       o.preSpatialDerivActionAtBndryFaces[#o.preSpatialDerivActionAtBndryFaces+1] =
          FixedComposition:new{wall_massf_composition=convertSpeciesTableToArray(o.wall_massf_composition)}
+   elseif o.catalytic_type == "catalytic_charged_species" then
+      o.preSpatialDerivActionAtBndryFaces[#o.preSpatialDerivActionAtBndryFaces+1] = 
+         ZeroChargedSpecies:new{}
    elseif o.catalytic_type == "equilibrium" then
       o.preSpatialDerivActionAtBndryFaces[#o.preSpatialDerivActionAtBndryFaces+1] =
          EquilibriumComposition:new{}
@@ -1437,6 +1446,7 @@ function InFlowBC_ShockFitting:new(o)
    }
    o.postConvFluxAction = { ConstFlux:new{flowState=o.flowState, x0=o.x0, y0=o.y0, z0=o.z0, r=o.r} }
    o.preSpatialDerivActionAtBndryFaces = { CopyCellData:new() }
+   o.postDiffFluxAction = { ConstFlux:new{flowState=o.flowState, x0=o.x0, y0=o.y0, z0=o.z0, r=o.r} }
    o.is_configured = true
    return o
 end

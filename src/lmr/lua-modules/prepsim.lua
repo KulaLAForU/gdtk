@@ -230,11 +230,12 @@ function makeFluidBlocks(bcDict, flowDict)
    end
    -- We only have fluid blocks created presently, so we can't handle grid connections
    -- that go to solid blocks. The test will be on ids. If the grid id is greater
-   -- then the available blocks, we will pass on that connection.
+   -- than the available blocks, we will pass on that connection.
    for idx, c in ipairs(gridConnections) do
       if (c.idA < #fluidBlocks and c.idB < #fluidBlocks) then
          -- Remember that the Lua array index will be one more than the block id.
-         connectBlocks(fluidBlocks[c.idA+1], c.faceA, fluidBlocks[c.idB+1], c.faceB, c.orientation)
+         connectBlocks(fluidBlocks[c.idA+1], c.faceA, fluidBlocks[c.idB+1], c.faceB, c.orientation,
+                       c.reorient_vector_quantities, c.RmatrixA, c.RmatrixB)
       end
    end
    return fluidBlocks
@@ -325,7 +326,9 @@ function readGridMetadata()
       print('number of connections=', #gridConnections)
       for i, c in ipairs(gridConnections) do
          print("i=", i, "idA=", c.idA, "faceA=", c.faceA,
-               "idB=", c.idB, "faceB=", c.faceB, "orientation=", c.orientation)
+               "idB=", c.idB, "faceB=", c.faceB, "orientation=", c.orientation,
+               "reorient_vector_quantities=", c.reorient_vector_quantities,
+               "RmatrixA=", dump(c.RmatrixA), "RmatrixB=", dump(c.RmatrixB))
       end
    end
    print(string.format('  #connections: %d', #gridConnections))
@@ -366,6 +369,10 @@ function buildRuntimeConfigFiles()
    write_config_file(lmrconfig.simulationConfigFilename())
    if (config.solver_mode ~= "steady") then
       write_control_file(cfgDir .. "/" .. lmrCfg["control-filename"])
+   else
+      cp_cmd = string.format("cp %s/share/default-commands-to-steady-mode %s/%s",
+         os.getenv("DGD"), cfgDir, lmrCfg["newton-krylov-commands-filename"])
+      os.execute(cp_cmd)
    end
    write_block_list_file(lmrconfig.blockListFilename())
    write_mpimap_file(lmrconfig.mpimapFilename())
@@ -429,8 +436,8 @@ function buildGridAndFieldFiles()
       end
       -- Ready to use initialState in the Dlang function.
       local grid = fluidBlocks[idx].grid
-      local omegaz = fluidBlocks[idx].omegaz
-      writeInitialFluidFile(id, grid, ifs, nil, omegaz)
+      local omegaz = gridMetadata.omegaz
+      writeInitialFluidFile(id, grid, ifs, omegaz)
    end
    --
    if #fluidBlocks == 0 then print("Warning: number of FluidBlocks is zero.") end
@@ -458,7 +465,7 @@ function buildGridAndFieldFiles()
 end
 
 if false then -- debug
-   print("Done loading prep-flow.lua")
+   print("Done loading prepsim.lua")
 end
 
 

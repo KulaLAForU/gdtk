@@ -48,6 +48,14 @@ public:
     LFace[] faces;
     LCell[] cells;
 
+    // Some storage for ghost-cell data (PJ 2025-06-09).
+    // It is intended that these local copies of cell data
+    // will allow parallel calculation of the slug updates.
+    // Note, however, that not all gas models are multithread-safe,
+    // so we need to have a local copy of the associated gas model.
+    LCell ghostL, ghostR;
+    GasModel gmodelL, gmodelR;
+
     this(size_t indx, JSONValue jsonData)
     {
         if (L1dConfig.verbosity_level >= 3) {
@@ -83,6 +91,73 @@ public:
         gsL = GasState(gmodel);
         gsR = GasState(gmodel);
     } // end constructor
+
+    void set_up_ghost_cells()
+    {
+        if (ecL) {
+            if (cast(Diaphragm) ecL) {
+                auto dia = cast(Diaphragm) ecL;
+                auto slugL =  dia.slugL;
+                gmodelL = init_gas_model(L1dConfig.gas_model_files[slugL.gmodel_id]);
+                ghostL = new LCell(gmodelL);
+            }
+            if (cast(GasInterface) ecL) {
+                auto my_ecL = cast(GasInterface) ecL;
+                auto slugL =  my_ecL.slugL;
+                gmodelL = init_gas_model(L1dConfig.gas_model_files[slugL.gmodel_id]);
+                ghostL = new LCell(gmodelL);
+            }
+        }
+        if (ecR) {
+            if (cast(Diaphragm) ecR) {
+                auto dia = cast(Diaphragm) ecR;
+                auto slugR =  dia.slugR;
+                gmodelR = init_gas_model(L1dConfig.gas_model_files[slugR.gmodel_id]);
+                ghostR = new LCell(gmodelR);
+            }
+            if (cast(GasInterface) ecR) {
+                auto my_ecR = cast(GasInterface) ecR;
+                auto slugR =  my_ecR.slugR;
+                gmodelR = init_gas_model(L1dConfig.gas_model_files[slugR.gmodel_id]);
+                ghostR = new LCell(gmodelR);
+            }
+        }
+        return;
+    } // end set_up_ghost_cells()
+
+    @nogc
+    void update_ghost_cell_data()
+    {
+        if (ecL) {
+            if (cast(Diaphragm) ecL) {
+                auto dia = cast(Diaphragm) ecL;
+                auto slugL =  dia.slugL;
+                LCell src = (dia.slugL_end == End.L) ? slugL.cells[0] : slugL.cells[$-1];
+                ghostL.copy_flow_state_from(src, gmodelL);
+            }
+            if (cast(GasInterface) ecL) {
+                auto my_ecL = cast(GasInterface) ecL;
+                auto slugL =  my_ecL.slugL;
+                LCell src = (my_ecL.slugL_end == End.L) ? slugL.cells[0] : slugL.cells[$-1];
+                ghostL.copy_flow_state_from(src, gmodelL);
+            }
+        }
+        if (ecR) {
+            if (cast(Diaphragm) ecR) {
+                auto dia = cast(Diaphragm) ecR;
+                auto slugR =  dia.slugR;
+                LCell src = (dia.slugR_end == End.L) ? slugR.cells[0] : slugR.cells[$-1];
+                ghostR.copy_flow_state_from(src, gmodelR);
+            }
+            if (cast(GasInterface) ecR) {
+                auto my_ecR = cast(GasInterface) ecR;
+                auto slugR =  my_ecR.slugR;
+                LCell src = (my_ecR.slugR_end == End.L) ? slugR.cells[0] : slugR.cells[$-1];
+                ghostR.copy_flow_state_from(src, gmodelR);
+            }
+        }
+        return;
+    } // end update_ghost_cell_data()
 
     void read_face_data(File fp, int tindx)
     {
@@ -171,31 +246,42 @@ public:
         fp.writeln("# end");
     } // end write_cell_data()
 
-    void write_history_loc_data(File fp, double t, double x)
+    void write_history_flow_data(File fp, double t, double x, size_t j)
     {
         // Write a subset of the data that will be common to all slugs,
         // no matter what gas model is associated with this slug.
+        LCell c = cells[j];
+        fp.write(format("%e %e %e %e", t, x, c.vel, c.L_bar));
+        fp.write(format(" %e %e %e %e", c.gas.rho, c.gas.p, c.gas.T, c.gas.u));
+        fp.write(format(" %e %e %e", c.gas.a, c.shear_stress, c.heat_flux));
+        double[] massf; massf.length = overall_species_count;
+        foreach (ref mf; massf) { mf = 0.0; }
+        foreach (i, mf; c.gas.massf) { massf[overall_species_index[gmodel_id][i]] = mf; }
+        foreach (mf; massf) { fp.write(format(" %e", mf)); }
+        double[] Tmodes; Tmodes.length = overall_modes_count;
+        foreach (ref tm; Tmodes) { tm = 0.0; }
+        foreach (i, tm; c.gas.T_modes) { Tmodes[overall_modes_index[gmodel_id][i]] = tm; }
+        foreach (tm; Tmodes) { fp.write(format(" %e", tm)); }
+        fp.write("\n");
+    } // end write_history_flow_data()
+
+    void write_history_cell_data(File fp, double t, size_t j)
+    {
+        double x = 0.5 * (faces[j].x + faces[j+1].x);
+        write_history_flow_data(fp, t, x, j);
+    }
+
+    void write_history_loc_data(File fp, double t, double x)
+    {
         // It may be that nothing is written, if there is not a cell
         // that covers the x-location.
         foreach (j; 0 .. ncells) {
             if ((x >= faces[j].x) && (x <= faces[j+1].x)) {
-                LCell c = cells[j];
-                fp.write(format("%e %e %e", t, c.vel, c.L_bar));
-                fp.write(format(" %e %e %e %e", c.gas.rho, c.gas.p, c.gas.T, c.gas.u));
-                fp.write(format(" %e %e %e", c.gas.a, c.shear_stress, c.heat_flux));
-                double[] massf; massf.length = overall_species_count;
-                foreach (ref mf; massf) { mf = 0.0; }
-                foreach (i, mf; c.gas.massf) { massf[overall_species_index[gmodel_id][i]] = mf; }
-                foreach (mf; massf) { fp.write(format(" %e", mf)); }
-                double[] Tmodes; Tmodes.length = overall_modes_count;
-                foreach (ref tm; Tmodes) { tm = 0.0; }
-                foreach (i, tm; c.gas.T_modes) { Tmodes[overall_modes_index[gmodel_id][i]] = tm; }
-                foreach (tm; Tmodes) { fp.write(format(" %e", tm)); }
-                fp.write("\n");
+            	write_history_flow_data(fp, t, x, j);
                 break;
             }
         }
-    } // end write_history_loc_data()
+    }
 
     @nogc @property
     double energy()
@@ -276,6 +362,7 @@ public:
         // compute face motion as Riemann subproblems.
         // There will be a single pressure and a single velocity
         // as a result of solving the Riemann problem.
+        //
         foreach (i, f; faces) {
             // Need to consider the end conditions.
             if (i == 0) {
@@ -286,10 +373,7 @@ public:
                         if (dia.state == DiaphragmState.open) {
                             // Slugs interact as per GasInterface.
                             LCell cR = cells[0];
-                            auto slugL =  dia.slugL;
-                            LCell cL = (dia.slugL_end == End.L) ?
-                                slugL.cells[0] : slugL.cells[$-1];
-                            lrivp(cL.gas, cR.gas, cL.vel, cR.vel, slugL.gmodel, gmodel, f.dxdt[level], f.p);
+                            lrivp(ghostL.gas, cR.gas, ghostL.vel, cR.vel, gmodelL, gmodel, f.dxdt[level], f.p);
                         } else {
                             // Diaphragm acts as a fixed wall.
                             LCell cR = cells[0];
@@ -300,10 +384,7 @@ public:
                     if (cast(GasInterface) ecL) {
                         auto my_ecL = cast(GasInterface) ecL;
                         LCell cR = cells[0];
-                        auto slugL =  my_ecL.slugL;
-                        LCell cL = (my_ecL.slugL_end == End.L) ?
-                            slugL.cells[0] : slugL.cells[$-1];
-                        lrivp(cL.gas, cR.gas, cL.vel, cR.vel, slugL.gmodel, gmodel, f.dxdt[level], f.p);
+                        lrivp(ghostL.gas, cR.gas, ghostL.vel, cR.vel, gmodelL, gmodel, f.dxdt[level], f.p);
                     }
                     if (cast(FreeEnd) ecL) {
                         LCell cR = cells[0];
@@ -334,10 +415,7 @@ public:
                         if (dia.state == DiaphragmState.open) {
                             // Slugs interact as per GasInterface.
                             LCell cL = cells[$-1];
-                            auto slugR =  dia.slugR;
-                            LCell cR = (dia.slugR_end == End.L) ?
-                                slugR.cells[0] : slugR.cells[$-1];
-                            lrivp(cL.gas, cR.gas, cL.vel, cR.vel, gmodel, slugR.gmodel, f.dxdt[level], f.p);
+                            lrivp(cL.gas, ghostR.gas, cL.vel, ghostR.vel, gmodel, gmodelR, f.dxdt[level], f.p);
                         } else {
                             // Diaphragm acts as a fixed wall.
                             LCell cL = cells[$-1];
@@ -348,10 +426,7 @@ public:
                     if (cast(GasInterface) ecR) {
                         auto my_ecR = cast(GasInterface) ecR;
                         LCell cL = cells[$-1];
-                        auto slugR =  my_ecR.slugR;
-                        LCell cR = (my_ecR.slugR_end == End.L) ?
-                            slugR.cells[0] : slugR.cells[$-1];
-                        lrivp(cL.gas, cR.gas, cL.vel, cR.vel, gmodel, slugR.gmodel, f.dxdt[level], f.p);
+                        lrivp(cL.gas, ghostR.gas, cL.vel, ghostR.vel, gmodel, gmodelR, f.dxdt[level], f.p);
                     }
                     if (cast(FreeEnd) ecR) {
                         LCell cL = cells[$-1];
