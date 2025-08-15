@@ -117,9 +117,10 @@ public:
         lua_getfield(L, -1, "relaxation_time");
         mRT = createRelaxationTime(L, m_p, m_q, gmodel);
         lua_pop(L, 1);
+        M_1 = getDouble(L, -1, "M");
     }
 
-    this(int p, int q, int mode_p, int mode_q, RelaxationTime RT, GasModel gmodel)
+    this(int p, int q, int mode_p, int mode_q, RelaxationTime RT, GasModel gmodel, double M_1)
     {
         m_p = p;
         m_q = q;
@@ -127,6 +128,7 @@ public:
         m_mode_q = mode_q;
         mRT = RT.dup();
         mGmodel = gmodel;
+        this.M_1 = M_1;
     }
 
     @nogc
@@ -142,7 +144,7 @@ public:
         //         This is taken care of as part of by using bath pressure in
         //         calculation of relaxation time.
         // NOTE 2. massf scaling is applied here to convert J/s/kg-of-species-ip to J/s/kg-of-mixture
-        double M_1 = 11.19750414;
+        // double M_1 = 10.150464790673578;
         number T_sh = ((2*1.4*M_1*M_1 - (1.4-1)) * ((1.4-1)*M_1*M_1 + 2) / ((1.4+1)*(1.4+1)*M_1*M_1)) * 293.0;
         // number T_sh = 6500.0;
         number s = 3.5*exp(-5000.0/T_sh);
@@ -152,6 +154,7 @@ public:
 private:
     int m_p;
     int m_q;
+    double M_1;
 }
 
 
