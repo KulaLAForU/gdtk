@@ -103,6 +103,12 @@ private:
 
 
 class LandauTeller2 : EnergyExchangeMechanism {
+    /*
+        Equation (7) from Park, C., 1989. Assessment of two-temperature kinetic model
+        for ionizing air. Journal of thermophysics and heat transfer, 3(3), pp.233-244. 
+        
+        @author: Jianshu Wu
+    */
 public:
 
     this(lua_State *L, int mode_p, int mode_q, GasModel gmodel)

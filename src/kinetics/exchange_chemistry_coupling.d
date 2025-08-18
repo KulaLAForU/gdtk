@@ -173,6 +173,8 @@ private:
 class KimHTCEnergyLoss : ExchangeChemistryCoupling {
     /*
         Equation 7 from Kim and Jo, 2021
+
+        @author: Jianshu Wu
     */
     this(lua_State *L, int mode) {
         this.D = getDouble(L, -1, "D");

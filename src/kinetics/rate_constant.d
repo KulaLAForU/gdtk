@@ -79,6 +79,12 @@ private:
     int _rctIdx;
 }
 class BackWardFromEquIfArrhenius : RateConstant {
+    /*
+        Curve-fitted function for K_eq, from Park, C., 1993. Review of chemical-kinetic 
+        problems of future NASA missions. I-Earth entries.
+        Journal of Thermophysics and Heat transfer, 7(3), pp.385-398.
+        @author: Jianshu Wu
+    */
 public:
     this(double A, double n, double C, double A_1, double A_2, double A_3, double A_4, double A_5, int rctIdx)
     {
@@ -119,6 +125,12 @@ private:
 }
 
 class BackWardFromEquIfPark2T : RateConstant {
+    /*
+        Curve-fitted function for K_eq, from Park, C., 1993. Review of chemical-kinetic 
+        problems of future NASA missions. I-Earth entries.
+        Journal of Thermophysics and Heat transfer, 7(3), pp.385-398.
+        @author: Jianshu Wu
+    */
 public:
     this(double A, double n, double C, double s, double A_1, double A_2, double A_3, double A_4, double A_5, int mode)
     {
