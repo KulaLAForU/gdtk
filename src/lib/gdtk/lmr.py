@@ -18,6 +18,11 @@ try:
     HAVE_PYVISTA = True
 except ModuleNotFoundError:
     HAVE_PYVISTA = False
+try:
+    import pandas as pd
+    HAVE_PANDAS = True
+except ModuleNotFoundError:
+    HAVE_PANDAS = False
 
 from gdtk.geom.sgrid import StructuredGrid
 from gdtk.gas import GasModel
@@ -53,6 +58,9 @@ class LmrConfig:
 
 # We will use Enums and NamedTuples to label the available metadata
 # and make it conveniently findable in the Python module.
+
+Face = Enum('Face', ['west', 'east', 'south', 'north', 'bottom', 'top'])
+FaceDict = {'west':0, 'east':1, 'south':2, 'north':3, 'bottom':4, 'top':5}
 
 DomainType = Enum('DomainType', ['FLUID', 'SOLID'])
 
@@ -94,9 +102,9 @@ class SimInfo:
     A place to store the information about an lmr simulation.
     """
     __slots__ = ['lmr_cfg', 'sim_cfg',
-                 'sim_dir', 'grid_dir', 'snaps_dir', 'vtk_dir',
+                 'sim_dir', 'grid_dir', 'snaps_dir', 'vtk_dir', 'loads_dir',
                  'blocks', 'grids', 'gridarrays', 'moving_grid',
-                 'snapshots', 'times',
+                 'snapshots', 'times', 'loads_indices',
                  'fluid_variables', 'gas_model']
 
     def __init__(self, lmr_cfg):
@@ -106,9 +114,10 @@ class SimInfo:
         """
         self.lmr_cfg = lmr_cfg
         self.sim_dir = self.lmr_cfg["simulation-directory"]
-        self.grid_dir = os.path.join(os.path.join(self.sim_dir, self.lmr_cfg["grid-directory"]))
+        self.grid_dir = os.path.join(self.sim_dir, self.lmr_cfg["grid-directory"])
         self.snaps_dir = os.path.join(self.sim_dir, self.lmr_cfg["snapshot-directory"])
         self.vtk_dir = os.path.join(self.sim_dir, self.lmr_cfg['vtk-output-directory'])
+        self.loads_dir = os.path.join(self.sim_dir, self.lmr_cfg['loads-directory'])
         #
         fname = os.path.join(self.sim_dir, self.lmr_cfg["config-filename"])
         with open(fname, 'r') as fp:
@@ -202,6 +211,13 @@ class SimInfo:
                 )
                 self.grids.append(gi)
         #
+        # Loads that can be found.
+        self.loads_indices = []
+        names = os.listdir(self.loads_dir)
+        indices = [int(n) for n in names if re.match(r'\d\d\d\d', n)]
+        indices.sort()
+        self.loads_indices = indices
+        #
         # Finally, set up a GasModel object that may be handy.
         #
         self.gas_model = GasModel(self.sim_cfg['gas_model_file'])
@@ -291,6 +307,40 @@ class SimInfo:
         if as_point_data:
             pv_data = pv_data.cell_data_to_point_data()
         return pv_data
+
+    def read_loads(self, indx, group, bf_list=None):
+        """
+        Returns a Pandas DataFrame with the surface loads for the specified group.
+
+        Args:
+        indx: int index of the loads files to be read
+        group: string name of the group associated with the required loads
+        bf_list: list of tuples that specify, in order, particular block+face pairs to load
+
+        The order in which the loads files are appended to the DateFrame
+        is determined by the directory listing, so it may make sense to
+        sort the resulting DataFrame on one of the columns, say 'pos.x'.
+        """
+        if not HAVE_PANDAS:
+            raise RuntimeError("pandas module is not loaded")
+        d = os.path.join(self.loads_dir, ('%04d' % indx))
+        if bf_list:
+            # We have been given a list of block+face tuples.
+            names = []
+            for blk,face in bf_list:
+                if isinstance(face, str): face = FaceDict[face.lower()]
+                names.append('blk-%04d-bndry-%d-%s.dat' % (blk, face, group))
+        else:
+            # Locate the files by name, filtering for the group name.
+            names = os.listdir(d)
+            target_str = '-' + group + '.'
+            names = [n for n in names if n.find(target_str) > 0]
+        blk_dfs = []
+        for n in names:
+            f = os.path.join(d, n)
+            blk_dfs.append(pd.read_table(f, sep=r'\s+'))
+        df = pd.concat(blk_dfs)
+        return df
 
     # end of class SimInfo
 

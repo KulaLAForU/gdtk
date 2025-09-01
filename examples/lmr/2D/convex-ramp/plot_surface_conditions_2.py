@@ -1,5 +1,5 @@
-# plot_surface_conditions.py
-# Assemble the ramp loads by picking up the loads files.
+# plot_surface_conditions_2.py
+# Assemble the ramp loads by picking up the loads files the hard way.
 # Peter J. 2024-03-13, 2025-08-27 simplify the reading of the dataframe
 # RJG, 2024-03-19
 #   + change to pyplot usage
@@ -21,7 +21,11 @@ import sys
 lmrcfg = LmrConfig()
 sim = SimInfo(lmrcfg)
 # Pick up the final loads files as a Pandas DataFrame.
-df = sim.read_loads(indx=sim.loads_indices[-1], group="loads")
+# We explicitly list the blocks and faces to load,
+# and build a list of tuples knowing that we want the
+# south face of every second block.
+blks_and_faces = [(blk, 'south') for blk in range(0,27,2)]
+df = sim.read_loads(indx=sim.loads_indices[-1], group="loads", bf_list=blks_and_faces)
 df = df.sort_values(by=['pos.x'])
 
 xp = np.loadtxt('mohammadian-figure-12-p_p_inf.data')
