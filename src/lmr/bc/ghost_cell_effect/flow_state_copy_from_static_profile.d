@@ -8,6 +8,7 @@ import std.json;
 import std.math;
 import std.stdio;
 import std.string;
+import std.random;
 
 import gas;
 import geom;
@@ -20,6 +21,28 @@ import lmr.globalconfig;
 import lmr.globaldata;
 import lmr.sfluidblock;
 
+
+
+void disturbance(FlowState* fs)
+{   
+    auto gmodel = GlobalConfig.gmodel_master;
+    double A = 1.0e-2;       // disturbance amplitude
+    double gamma = gmodel.gamma(fs.gas).re;
+    auto R = uniform(0.0, 1.0);
+    double a_inf2 = fs.gas.a.re * fs.gas.a.re;
+
+    double p_prime = A * (2.0 * R - 1.0);
+    double rho_prime = p_prime / a_inf2;
+    double u_prime = p_prime;
+    double T_prime = p_prime * (gamma - 1.0) * fs.gas.T.re / (fs.gas.rho.re * a_inf2);
+
+    // Apply disturbance
+    fs.gas.p    += p_prime;
+    fs.gas.rho  += rho_prime;
+    fs.gas.T += T_prime;
+    fs.vel.x += u_prime;
+    // writeln("disturbance called");
+}
 
 class GhostCellFlowStateCopyFromStaticProfile : GhostCellEffect {
 public:
@@ -40,6 +63,7 @@ public:
         BoundaryCondition bc = blk.bc[which_boundary];
         auto ghost0 = (bc.outsigns[f.i_bndry] == 1) ? f.right_cell : f.left_cell;
         ghost0.fs.copy_values_from(fprofile.get_flowstate(ghost0.id, ghost0.pos[0]));
+        disturbance(ghost0.fs);
         fprofile.adjust_velocity(ghost0.fs, ghost0.pos[0], blk.omegaz);
     }
 
@@ -50,6 +74,7 @@ public:
         foreach (i, f; bc.faces) {
             auto ghost0 = (bc.outsigns[i] == 1) ? f.right_cell : f.left_cell;
             ghost0.fs.copy_values_from(fprofile.get_flowstate(ghost0.id, ghost0.pos[0]));
+            disturbance(ghost0.fs);
             fprofile.adjust_velocity(ghost0.fs, ghost0.pos[0], blk.omegaz);
         }
     } // end apply_unstructured_grid()
@@ -63,6 +88,7 @@ public:
         foreach (n; 0 .. blk.n_ghost_cell_layers) {
             auto ghost = (bc.outsigns[f.i_bndry] == 1) ? f.right_cells[n] : f.left_cells[n];
             ghost.fs.copy_values_from(fprofile.get_flowstate(ghost.id, ghost.pos[0]));
+            disturbance(ghost.fs);
             fprofile.adjust_velocity(ghost.fs, ghost.pos[0], blk.omegaz);
         }
     } // end apply_for_interface_structured_grid()
@@ -77,6 +103,7 @@ public:
             foreach (n; 0 .. blk.n_ghost_cell_layers) {
                 auto ghost = (bc.outsigns[i] == 1) ? f.right_cells[n] : f.left_cells[n];
                 ghost.fs.copy_values_from(fprofile.get_flowstate(ghost.id, ghost.pos[0]));
+                disturbance(ghost.fs);
                 fprofile.adjust_velocity(ghost.fs, ghost.pos[0], blk.omegaz);
             }
         }
