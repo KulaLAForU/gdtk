@@ -8,6 +8,7 @@ public import lmr.bc.ghost_cell_effect.flow_state_copy_from_transient_profile;
 public import lmr.bc.ghost_cell_effect.flow_state_copy_from_history;
 public import lmr.bc.ghost_cell_effect.synthesise_flow_state;
 public import lmr.bc.ghost_cell_effect.extrapolate_copy;
+public import lmr.bc.ghost_cell_effect.characteristic_outflow;
 public import lmr.bc.ghost_cell_effect.from_upwind;
 public import lmr.bc.ghost_cell_effect.fixed_p;
 public import lmr.bc.ghost_cell_effect.fixed_pt;

@@ -17,6 +17,7 @@ version(mpi_parallel) {
 }
 
 import lmr.bc.ghost_cell_effect.gas_solid_full_face_copy;
+import lmr.bc.ghost_cell_effect.characteristic_outflow;
 import lmr.bc;
 import lmr.flowstate;
 import lmr.fluidblock;
@@ -111,6 +112,9 @@ GhostCellEffect make_GCE_from_json(JSONValue jsonData, int blk_id, int boundary)
     case "extrapolate_copy":
         int xOrder = getJSONint(jsonData, "x_order", 0);
         newGCE = new GhostCellExtrapolateCopy(blk_id, boundary, xOrder);
+        break;
+    case "characteristic_outflow":
+        newGCE = new GhostCellCharacteristicOutflow(blk_id, boundary);
         break;
     case "from_upwind_copy":
         auto flowstate = FlowState(jsonData["flowstate"], gmodel);
