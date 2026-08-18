@@ -149,6 +149,12 @@ function ExtrapolateCopy:tojson()
    return str
 end
 
+CharacteristicOutflow = GhostCellEffect:new{}
+CharacteristicOutflow.type = "characteristic_outflow"
+function CharacteristicOutflow:tojson()
+   return string.format('          {"type": "%s"}', self.type)
+end
+
 FixedP = GhostCellEffect:new{p_outside=1.0e5}
 FixedP.type = "fixed_pressure"
 function FixedP:tojson()
@@ -1546,6 +1552,31 @@ function InOutFlowBC_DualState:new(o)
    return o
 end
 
+-- Supersonic characteristic outflow for north/south boundaries of 2-D
+-- structured grids. Characteristic feet outside the block, and locally
+-- subsonic states, fall back to zero-order extrapolation.
+OutFlowBC_Characteristic = BoundaryCondition:new()
+OutFlowBC_Characteristic.type = "outflow_characteristic"
+function OutFlowBC_Characteristic:new(o)
+   local flag = type(self)=='table' and self.type=='outflow_characteristic'
+   if not flag then
+      error("Make sure that you are using OutFlowBC_Characteristic:new{}"..
+               " and not OutFlowBC_Characteristic.new{}", 2)
+   end
+   o = o or {}
+   flag = checkAllowedNames(o, {"label", "group", "field_bc"})
+   if not flag then
+      error("Invalid name for item supplied to OutFlowBC_Characteristic constructor.", 2)
+   end
+   o = BoundaryCondition.new(self, o)
+   o.is_wall_with_viscous_effects = false
+   o.preReconAction = { CharacteristicOutflow:new{} }
+   o.preSpatialDerivActionAtBndryFaces = { CopyCellData:new{} }
+   o.is_configured = true
+   return o
+end
+
+
 OutFlowBC_SimpleExtrapolate = BoundaryCondition:new()
 OutFlowBC_SimpleExtrapolate.type = "outflow_simple_extrapolate"
 function OutFlowBC_SimpleExtrapolate:new(o)
@@ -2124,4 +2155,3 @@ function SolidFullFaceCopyBoundaryBC:new(o)
                                                                                    orientation=o.orientation} }
    return o
 end
-

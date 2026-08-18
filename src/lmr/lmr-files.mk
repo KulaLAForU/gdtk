@@ -64,6 +64,7 @@ LMR_BC_FILES = $(LMR)/bc/package.d \
 	$(LMR)/bc/ghost_cell_effect/flow_state_copy_from_history.d \
 	$(LMR)/bc/ghost_cell_effect/synthesise_flow_state.d \
 	$(LMR)/bc/ghost_cell_effect/extrapolate_copy.d \
+	$(LMR)/bc/ghost_cell_effect/characteristic_outflow.d \
 	$(LMR)/bc/ghost_cell_effect/from_upwind.d \
 	$(LMR)/bc/ghost_cell_effect/fixed_p.d \
 	$(LMR)/bc/ghost_cell_effect/fixed_pt.d \
